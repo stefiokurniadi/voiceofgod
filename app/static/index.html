@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>voiceofgod</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="shell">
+    <h1>voiceofgod</h1>
+    <p class="lede">Live sermon captions for the room. English and Bahasa Indonesia. Listeners open a link. They do not install an app or create an account.</p>
+    <form id="create">
+      <label for="language">Speaker language</label>
+      <select id="language" name="speaker_language">
+        <option value="en">English</option>
+        <option value="id">Bahasa Indonesia</option>
+      </select>
+      <label for="names">Names and phrases to leave untranslated</label>
+      <textarea id="names" placeholder="Grace Church&#10;One name or phrase on each line"></textarea>
+      <p class="error" id="error"></p>
+      <button class="primary" id="submit" type="submit">Create session</button>
+    </form>
+  </div>
+  <script>
+    const form = document.querySelector("#create");
+    const error = document.querySelector("#error");
+    const submit = document.querySelector("#submit");
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      error.textContent = "";
+      submit.disabled = true;
+      submit.textContent = "Preparing models…";
+      const names = document.querySelector("#names").value.split(/\n/).map((line) => line.trim()).filter(Boolean);
+      try {
+        const response = await fetch("/api/sessions", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            speaker_language: document.querySelector("#language").value,
+            do_not_translate: names
+          })
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || "Could not create the session.");
+        window.location = body.operator_url;
+      } catch (err) {
+        error.textContent = err.message;
+        submit.disabled = false;
+        submit.textContent = "Create session";
+      }
+    });
+  </script>
+</body>
+</html>

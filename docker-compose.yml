@@ -1,0 +1,50 @@
+services:
+  valkey:
+    image: valkey/valkey:8
+    restart: unless-stopped
+
+  translator:
+    image: ${VLLM_IMAGE:-vllm/vllm-openai:v0.31.0}
+    profiles: ["gpu"]
+    ipc: host
+    command: >
+      --model ${VLLM_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      --max-model-len 4096
+      --gpu-memory-utilization ${VLLM_GPU_MEMORY_UTILIZATION:-0.70}
+    environment:
+      HF_HOME: /models
+    volumes:
+      - model-cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  api:
+    build: .
+    depends_on:
+      - valkey
+    env_file:
+      - .env
+    environment:
+      REDIS_URL: redis://valkey:6379/0
+      VLLM_BASE_URL: http://translator:8000/v1
+      MODEL_DIR: /models
+      VOICEOFGOD_ROOT: /opt/voiceofgod
+    ports:
+      - "8080:8080"
+    volumes:
+      - model-cache:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+volumes:
+  model-cache:

@@ -1,0 +1,31 @@
+# Seed glossary. Churches add their own names at session creation.
+# Divine names (Tuhan / Allah / Lord / God) are intentionally absent.
+# A church can pass its own pairs when creating a session.
+do_not_translate: []
+terms:
+  - en: Holy Spirit
+    id: Roh Kudus
+  - en: grace
+    id: anugerah
+  - en: worship service
+    id: kebaktian
+    id_aliases: [ibadah]
+  - en: pastor
+    id: pendeta
+    id_aliases: [gembala]
+  - en: sermon
+    id: khotbah
+  - en: prayer
+    id: doa
+  - en: congregation
+    id: jemaat
+  - en: gospel
+    id: Injil
+  - en: faith
+    id: iman
+  - en: salvation
+    id: keselamatan
+  - en: blessing
+    id: berkat
+  - en: cross
+    id: salib

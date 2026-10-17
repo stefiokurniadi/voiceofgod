@@ -1,0 +1,19 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    public_base_url: str = ""
+    redis_url: str = ""
+    require_redis: bool = False
+    vllm_base_url: str = ""
+    vllm_model: str = "Qwen/Qwen2.5-7B-Instruct"
+    require_translator: bool = False
+    allow_fake_models: bool = False
+    whisper_model: str = "large-v3-turbo"
+    whisper_device: str = "cpu"
+    whisper_compute_type: str = "int8"
+    model_dir: str = ""
+    max_live_sessions: int = 1
+    translate_timeout_seconds: float = 3.5

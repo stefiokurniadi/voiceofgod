@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Listen</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="listener">
+  <header class="bar">
+    <div>
+      <strong id="title">Captions</strong>
+      <div class="banner" id="banner"></div>
+    </div>
+    <div class="controls">
+      <button type="button" id="show-en">English</button>
+      <button type="button" id="show-id">Bahasa Indonesia</button>
+      <button type="button" id="smaller" aria-label="Smaller text">A−</button>
+      <button type="button" id="larger" aria-label="Larger text">A+</button>
+    </div>
+  </header>
+  <main class="captions" id="captions" data-size="3"></main>
+  <button type="button" id="jump" hidden>Live</button>
+  <script src="/static/captions.js"></script>
+  <script>
+    const sessionId = location.pathname.split("/").filter(Boolean).pop();
+    const captions = document.querySelector("#captions");
+    const banner = document.querySelector("#banner");
+    const title = document.querySelector("#title");
+    let speaker = "en";
+    let display = localStorage.getItem("voiceofgod-language") || "translated";
+    let size = Number(localStorage.getItem("voiceofgod-size") || "3");
+    let snapshot = null;
+    captions.dataset.size = String(size);
+
+    function fieldOf() {
+      if (display === "original") return "original";
+      return "translation";
+    }
+
+    const view = CaptionView(captions, { fieldOf, jumpButton: document.querySelector("#jump") });
+
+    function markLanguages() {
+      const englishIsOriginal = speaker === "en";
+      document.querySelector("#show-en").classList.toggle("active", (display === "original") === englishIsOriginal);
+      document.querySelector("#show-id").classList.toggle("active", (display === "translation") === englishIsOriginal);
+      title.textContent = display === "original"
+        ? (speaker === "en" ? "English" : "Bahasa Indonesia")
+        : (speaker === "en" ? "Bahasa Indonesia" : "English");
+    }
+
+    function paint(next) {
+      snapshot = next;
+      speaker = next.speaker_language || speaker;
+      banner.textContent = next.status === "ended" ? "This session has ended." : (next.banner || "");
+      markLanguages();
+      view.applySnapshot(next);
+    }
+
+    async function load() {
+      const response = await fetch(`/api/sessions/${sessionId}/captions`);
+      if (!response.ok) {
+        banner.textContent = "This session was not found.";
+        return;
+      }
+      paint(await response.json());
+    }
+
+    function connect() {
+      const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/listen/${sessionId}`);
+      socket.onmessage = (message) => {
+        const event = JSON.parse(message.data);
+        if (event.type === "deleted") {
+          banner.textContent = "This session was deleted.";
+          captions.replaceChildren();
+          return;
+        }
+        if (event.type === "snapshot") {
+          paint(event);
+          return;
+        }
+        if (!snapshot) snapshot = { lines: [], provisional: null, speaker_language: speaker };
+        snapshot.status = event.status || snapshot.status;
+        snapshot.banner = event.banner || "";
+        snapshot.speaker_language = event.speaker_language || snapshot.speaker_language;
+        if (event.line && event.line.state === "final" && !event.line.hidden) {
+          const index = snapshot.lines.findIndex((line) => line.id === event.line.id);
+          if (index >= 0) snapshot.lines[index] = event.line;
+          else snapshot.lines.push(event.line);
+        }
+        if (event.line && event.line.hidden) {
+          snapshot.lines = snapshot.lines.filter((line) => line.id !== event.line.id);
+        }
+        snapshot.provisional = event.provisional || null;
+        banner.textContent = snapshot.status === "ended" ? "This session has ended." : (snapshot.banner || "");
+        markLanguages();
+        view.applyEvent(event);
+      };
+      socket.onclose = () => {
+        banner.textContent = banner.textContent || "Reconnecting…";
+        setTimeout(async () => { await load(); connect(); }, 1500);
+      };
+    }
+
+    document.querySelector("#show-en").addEventListener("click", () => {
+      display = speaker === "en" ? "original" : "translation";
+      localStorage.setItem("voiceofgod-language", display);
+      markLanguages();
+      if (snapshot) view.refresh(snapshot);
+    });
+    document.querySelector("#show-id").addEventListener("click", () => {
+      display = speaker === "id" ? "original" : "translation";
+      localStorage.setItem("voiceofgod-language", display);
+      markLanguages();
+      if (snapshot) view.refresh(snapshot);
+    });
+    document.querySelector("#smaller").addEventListener("click", () => {
+      size = Math.max(1, size - 1);
+      captions.dataset.size = String(size);
+      localStorage.setItem("voiceofgod-size", String(size));
+    });
+    document.querySelector("#larger").addEventListener("click", () => {
+      size = Math.min(5, size + 1);
+      captions.dataset.size = String(size);
+      localStorage.setItem("voiceofgod-size", String(size));
+    });
+
+    load().then(connect);
+  </script>
+</body>
+</html>

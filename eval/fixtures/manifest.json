@@ -1,0 +1,71 @@
+{
+  "clips": [
+    {
+      "id": "silence-5s",
+      "audio": "silence-5s.wav",
+      "language": "en",
+      "reference_transcript": "",
+      "reference_translation": "",
+      "tags": ["silence"],
+      "expect": "empty"
+    },
+    {
+      "id": "tone-music",
+      "audio": "tone-music.wav",
+      "language": "en",
+      "reference_transcript": "",
+      "reference_translation": "",
+      "tags": ["music", "singing"],
+      "expect": "empty-or-worship"
+    },
+    {
+      "id": "pending-en-fast",
+      "audio": null,
+      "language": "en",
+      "tags": ["speech", "fast", "english"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-en-runon",
+      "audio": null,
+      "language": "en",
+      "tags": ["speech", "run-on", "english"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-en-correction",
+      "audio": null,
+      "language": "en",
+      "tags": ["speech", "self-correction", "english"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-en-verse",
+      "audio": null,
+      "language": "en",
+      "tags": ["speech", "verse-reading", "english"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-id-glossary",
+      "audio": null,
+      "language": "id",
+      "tags": ["speech", "glossary", "indonesian"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-name-grace",
+      "audio": null,
+      "language": "en",
+      "tags": ["speech", "name-collision", "glossary"],
+      "expect": "pending"
+    },
+    {
+      "id": "pending-codeswitch",
+      "audio": null,
+      "language": "id",
+      "tags": ["speech", "code-switch", "indonesian"],
+      "expect": "pending"
+    }
+  ]
+}

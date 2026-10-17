@@ -1,0 +1,9 @@
+.venv
+.git
+.pytest_cache
+.mypy_cache
+**/__pycache__
+.env
+.models
+eval/results
+*.sermon.wav
