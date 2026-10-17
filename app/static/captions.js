@@ -34,6 +34,12 @@ window.CaptionView = function (container, options) {
     if (options.decorate) options.decorate(node, line);
   }
 
+  function applyResume(lines, provisional) {
+    for (const line of lines || []) upsert(line);
+    if (provisional && !provisional.hidden) upsert(provisional);
+    follow();
+  }
+
   function applySnapshot(snapshot) {
     const seen = new Set();
     for (const line of snapshot.lines || []) {
@@ -83,5 +89,5 @@ window.CaptionView = function (container, options) {
     });
   }
 
-  return { applySnapshot, applyEvent, refresh, follow };
+  return { applySnapshot, applyEvent, applyResume, refresh, follow };
 };

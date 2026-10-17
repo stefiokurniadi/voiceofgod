@@ -98,6 +98,13 @@ def create_app(
             raise HTTPException(404, "Session not found.")
         return FileResponse(STATIC_DIR / "listener.html")
 
+    @app.get("/v/{session_id}")
+    async def overlay_page(session_id: str, request: Request):
+        document = await request.app.state.director.session(session_id)
+        if not document:
+            raise HTTPException(404, "Session not found.")
+        return FileResponse(STATIC_DIR / "overlay.html")
+
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
     return app
 

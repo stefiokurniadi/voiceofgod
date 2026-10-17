@@ -47,6 +47,7 @@ class Director:
             raise RuntimeError("Translator is not ready.")
         session_id = secrets.token_urlsafe(12)
         secret = secrets.token_urlsafe(24)
+        glossary = self.glossary.merged(do_not_translate, terms)
         document = {
             "id": session_id,
             "speaker_language": speaker_language,
@@ -61,10 +62,10 @@ class Director:
             "translator_ready": translator_ready,
             "development_translator": bool(getattr(self.translator, "development", False)),
             "created_at": datetime.now(timezone.utc).isoformat(),
+            "glossary": glossary.to_dict(),
         }
         if document["development_translator"]:
             document["banner"] = "Development translator is on. These are not real translations."
-        glossary = self.glossary.merged(do_not_translate, terms)
         pipeline = SessionPipeline(
             document,
             self.repository,
@@ -109,7 +110,7 @@ class Director:
         if pipeline.started and pipeline.doc.get("status") != "ended":
             return
         if self.live_count() >= self.settings.max_live_sessions:
-            raise RuntimeError("A session is already live on this server.")
+            raise RuntimeError(f"This server is already running {self.settings.max_live_sessions} sessions.")
         await pipeline.start()
 
     async def stop(self, session_id: str) -> None:
@@ -131,6 +132,19 @@ class Director:
         await self.repository.delete(session_id)
         self.pipelines.pop(session_id, None)
         logger.info("session %s deleted", session_id)
+
+    async def update_glossary(self, session_id: str, terms: list[dict], do_not_translate: list[str]) -> dict:
+        from app.glossary import Glossary
+
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        glossary = Glossary.from_public(terms, do_not_translate)
+        async with pipeline.lock:
+            pipeline.glossary = glossary
+            pipeline.doc["glossary"] = glossary.to_dict()
+        await pipeline._emit("status")
+        return glossary.to_dict()
 
     async def note_listeners(self, session_id: str, delta: int) -> None:
         self.listeners[session_id] = max(0, self.listeners[session_id] + delta)

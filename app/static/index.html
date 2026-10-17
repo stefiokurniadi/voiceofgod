@@ -46,7 +46,10 @@
         if (!response.ok) throw new Error(body.detail || "Could not create the session.");
         window.location = body.operator_url;
       } catch (err) {
-        error.textContent = err.message;
+        const offline = err instanceof TypeError;
+        error.textContent = offline
+          ? "The caption service is not reachable. Open this page from the running server, then try again."
+          : err.message;
         submit.disabled = false;
         submit.textContent = "Create session";
       }

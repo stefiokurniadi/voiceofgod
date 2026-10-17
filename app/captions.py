@@ -127,4 +127,15 @@ def project_session(document: dict, role: str) -> dict:
         projected["metrics"] = document.get("metrics") or {}
         projected["development_translator"] = bool(document.get("development_translator"))
         projected["translator_ready"] = bool(document.get("translator_ready"))
+        projected["glossary"] = document.get("glossary") or {"terms": [], "do_not_translate": []}
     return projected
+
+
+def lines_after(lines: list[dict], after_id: str | None) -> list[dict] | None:
+    """Lines strictly after an acknowledged caption. None means the id is unknown."""
+    if not after_id:
+        return lines
+    ids = [line.get("id") for line in lines]
+    if after_id not in ids:
+        return None
+    return lines[ids.index(after_id) + 1 :]

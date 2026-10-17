@@ -32,6 +32,10 @@
     let display = localStorage.getItem("voiceofgod-language") || "translated";
     let size = Number(localStorage.getItem("voiceofgod-size") || "3");
     let snapshot = null;
+    let lastLineId = "";
+    let lastSeq = 0;
+    let reconnectTimer = null;
+    let stopped = false;
     captions.dataset.size = String(size);
 
     function fieldOf() {
@@ -50,9 +54,31 @@
         : (speaker === "en" ? "Bahasa Indonesia" : "English");
     }
 
+    function remember(event) {
+      if (event.seq) lastSeq = Math.max(lastSeq, event.seq);
+      for (const line of event.lines || []) {
+        if (line.state === "final" && !line.hidden) lastLineId = line.id;
+      }
+      if (event.line && event.line.state === "final" && !event.line.hidden) lastLineId = event.line.id;
+    }
+
+    function mergeLines(lines) {
+      if (!snapshot) snapshot = { lines: [], provisional: null, speaker_language: speaker };
+      for (const line of lines || []) {
+        if (line.hidden) {
+          snapshot.lines = snapshot.lines.filter((item) => item.id !== line.id);
+          continue;
+        }
+        const index = snapshot.lines.findIndex((item) => item.id === line.id);
+        if (index >= 0) snapshot.lines[index] = line;
+        else snapshot.lines.push(line);
+      }
+    }
+
     function paint(next) {
       snapshot = next;
       speaker = next.speaker_language || speaker;
+      remember(next);
       banner.textContent = next.status === "ended" ? "This session has ended." : (next.banner || "");
       markLanguages();
       view.applySnapshot(next);
@@ -62,44 +88,60 @@
       const response = await fetch(`/api/sessions/${sessionId}/captions`);
       if (!response.ok) {
         banner.textContent = "This session was not found.";
+        stopped = true;
         return;
       }
       paint(await response.json());
     }
 
     function connect() {
-      const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/listen/${sessionId}`);
+      const query = new URLSearchParams();
+      if (lastLineId) query.set("after", lastLineId);
+      if (lastSeq) query.set("since", String(lastSeq));
+      const suffix = query.toString() ? `?${query}` : "";
+      const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/listen/${sessionId}${suffix}`);
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data);
+        remember(event);
         if (event.type === "deleted") {
+          stopped = true;
           banner.textContent = "This session was deleted.";
           captions.replaceChildren();
+          socket.close();
           return;
         }
+        if (event.status === "ended") stopped = true;
         if (event.type === "snapshot") {
           paint(event);
+          return;
+        }
+        if (event.type === "resume") {
+          speaker = event.speaker_language || speaker;
+          mergeLines(event.lines);
+          if (snapshot) {
+            snapshot.provisional = event.provisional || null;
+            snapshot.status = event.status || snapshot.status;
+            snapshot.banner = event.banner || "";
+          }
+          banner.textContent = event.status === "ended" ? "This session has ended." : (event.banner || "");
+          markLanguages();
+          view.applyResume(event.lines, event.provisional);
           return;
         }
         if (!snapshot) snapshot = { lines: [], provisional: null, speaker_language: speaker };
         snapshot.status = event.status || snapshot.status;
         snapshot.banner = event.banner || "";
         snapshot.speaker_language = event.speaker_language || snapshot.speaker_language;
-        if (event.line && event.line.state === "final" && !event.line.hidden) {
-          const index = snapshot.lines.findIndex((line) => line.id === event.line.id);
-          if (index >= 0) snapshot.lines[index] = event.line;
-          else snapshot.lines.push(event.line);
-        }
-        if (event.line && event.line.hidden) {
-          snapshot.lines = snapshot.lines.filter((line) => line.id !== event.line.id);
-        }
+        if (event.line && event.line.state === "final") mergeLines([event.line]);
         snapshot.provisional = event.provisional || null;
         banner.textContent = snapshot.status === "ended" ? "This session has ended." : (snapshot.banner || "");
         markLanguages();
         view.applyEvent(event);
       };
       socket.onclose = () => {
-        banner.textContent = banner.textContent || "Reconnecting…";
-        setTimeout(async () => { await load(); connect(); }, 1500);
+        if (stopped || reconnectTimer) return;
+        banner.textContent = "Reconnecting…";
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 1000);
       };
     }
 

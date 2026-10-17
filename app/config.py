@@ -15,5 +15,5 @@ class Settings(BaseSettings):
     whisper_device: str = "cpu"
     whisper_compute_type: str = "int8"
     model_dir: str = ""
-    max_live_sessions: int = 1
+    max_live_sessions: int = 4
     translate_timeout_seconds: float = 3.5

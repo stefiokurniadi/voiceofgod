@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Overlay</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="overlay">
+  <p class="banner" id="banner"></p>
+  <main class="captions size-4" id="captions"></main>
+  <script src="/static/captions.js"></script>
+  <script>
+    const sessionId = location.pathname.split("/").pop();
+    const params = new URLSearchParams(location.search);
+    const view = CaptionView(document.querySelector("#captions"), { controls: false });
+    const banner = document.querySelector("#banner");
+    let lastLineId = "";
+    let lastSeq = 0;
+    let reconnectTimer = null;
+    let stopped = false;
+
+    if (params.get("bg") === "black") document.body.style.background = "#000";
+
+    function remember(event) {
+      if (event.seq) lastSeq = Math.max(lastSeq, event.seq);
+      for (const line of event.lines || []) {
+        if (line.state === "final") lastLineId = line.id;
+      }
+      if (event.line && event.line.state === "final") lastLineId = event.line.id;
+    }
+
+    function connect() {
+      const query = new URLSearchParams();
+      if (lastLineId) query.set("after", lastLineId);
+      if (lastSeq) query.set("since", String(lastSeq));
+      const suffix = query.toString() ? `?${query}` : "";
+      const socket = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws/listen/${sessionId}${suffix}`);
+      socket.onmessage = (message) => {
+        const event = JSON.parse(message.data);
+        remember(event);
+        if (event.type === "deleted") { stopped = true; socket.close(); return; }
+        if (event.status === "ended") stopped = true;
+        banner.textContent = event.banner || "";
+        if (event.type === "snapshot") { view.applySnapshot(event); return; }
+        if (event.type === "resume") { view.applyResume(event.lines, event.provisional); return; }
+        view.applyEvent(event);
+      };
+      socket.onclose = () => {
+        if (stopped || reconnectTimer) return;
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 1000);
+      };
+    }
+    connect();
+  </script>
+</body>
+</html>

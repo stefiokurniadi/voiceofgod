@@ -6,16 +6,15 @@ import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 import segno
 
-from app.captions import project_session
+from app.captions import lines_after, project_session
+from app.export import render_srt, render_txt
+from app.gpu import read_gpu
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
-
-# project_event is defined below if I forgot - I'll add it to captions.py
-# Wait, I need to add project_event to captions. I'll add it in this file instead to avoid another edit if missing.
 
 def _event_for(event: dict, role: str) -> dict:
     from app.captions import project_line
@@ -31,6 +30,17 @@ def _event_for(event: dict, role: str) -> dict:
     }
     if role == "operator":
         projected["metrics"] = event.get("metrics") or {}
+    return projected
+
+
+def _catchup(document: dict, role: str, after: str) -> dict:
+    projected = project_session(document, role)
+    newer = lines_after(projected["lines"], after or None)
+    if newer is None:
+        projected["type"] = "snapshot"
+        return projected
+    projected["lines"] = newer
+    projected["type"] = "resume" if after else "snapshot"
     return projected
 
 
@@ -162,7 +172,75 @@ async def listener_captions(session_id: str, request: Request):
     document = await request.app.state.director.session(session_id)
     if not document or document.get("status") == "deleted":
         raise HTTPException(404, "Session not found.")
-    return project_session(document, "listener")
+    return _catchup(document, "listener", request.query_params.get("after", ""))
+
+
+@router.get("/api/sessions/{session_id}/glossary")
+async def get_glossary(session_id: str, request: Request):
+    document = await request.app.state.director.authorize(session_id, _token(request))
+    if not document:
+        raise HTTPException(401, "Operator token is not valid.")
+    return document.get("glossary") or {"terms": [], "do_not_translate": []}
+
+
+@router.put("/api/sessions/{session_id}/glossary")
+async def put_glossary(session_id: str, request: Request):
+    if not await request.app.state.director.authorize(session_id, _token(request)):
+        raise HTTPException(401, "Operator token is not valid.")
+    body = await request.json()
+    try:
+        saved = await request.app.state.director.update_glossary(
+            session_id,
+            body.get("terms") or [],
+            body.get("do_not_translate") or [],
+        )
+    except KeyError:
+        raise HTTPException(404, "Session not found.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return saved
+
+
+@router.get("/api/sessions/{session_id}/metrics")
+async def session_metrics(session_id: str, request: Request):
+    document = await request.app.state.director.authorize(session_id, _token(request))
+    if not document:
+        raise HTTPException(401, "Operator token is not valid.")
+    metrics = dict(document.get("metrics") or {})
+    metrics["gpu"] = read_gpu()
+    return metrics
+
+
+@router.get("/api/sessions/{session_id}/export.txt")
+async def export_txt(session_id: str, request: Request):
+    document = await _export_document(request, session_id)
+    projected = project_session(document, "listener")
+    body = render_txt(projected["lines"], document["speaker_language"])
+    return Response(
+        body,
+        media_type="text/plain; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{session_id}.txt"'},
+    )
+
+
+@router.get("/api/sessions/{session_id}/export.srt")
+async def export_srt(session_id: str, request: Request):
+    document = await _export_document(request, session_id)
+    projected = project_session(document, "listener")
+    body = render_srt(projected["lines"])
+    return Response(
+        body,
+        media_type="application/x-subrip; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{session_id}.srt"'},
+    )
+
+
+async def _export_document(request: Request, session_id: str) -> dict:
+    token = _token(request) or request.query_params.get("k", "")
+    document = await request.app.state.director.authorize(session_id, token)
+    if not document:
+        raise HTTPException(401, "Operator token is not valid.")
+    return document
 
 
 @router.get("/api/sessions/{session_id}")
@@ -199,7 +277,8 @@ async def listen(websocket: WebSocket, session_id: str):
         async with repository.subscribe(session_id) as subscription:
             current = await websocket.app.state.director.session(session_id)
             if current:
-                await websocket.send_json({"type": "snapshot", **project_session(current, "listener")})
+                payload = _catchup(current, "listener", websocket.query_params.get("after", ""))
+                await websocket.send_json(payload)
                 seen = current.get("seq") or 0
             else:
                 seen = 0
@@ -234,7 +313,8 @@ async def operate(websocket: WebSocket, session_id: str):
     async def pump_events():
         async with repository.subscribe(session_id) as subscription:
             current = await websocket.app.state.director.session(session_id)
-            await websocket.send_json({"type": "snapshot", **project_session(current, "operator")})
+            payload = _catchup(current, "operator", websocket.query_params.get("after", ""))
+            await websocket.send_json(payload)
             seen = current.get("seq") or 0
             async for event in subscription:
                 if (event.get("seq") or 0) <= seen:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import inspect
 import logging
+import threading
 
 from app.captions import Transcript, Word
 
@@ -86,6 +87,7 @@ class WhisperRecognizer:
         self.download_root = download_root or None
         self.model = None
         self._supports_hotwords = False
+        self._lock = threading.Lock()
 
     def ensure_loaded(self) -> None:
         if self.model is not None:
@@ -105,6 +107,10 @@ class WhisperRecognizer:
 
     def transcribe(self, audio, language: str, hotwords: str | None = None) -> Transcript:
         self.ensure_loaded()
+        with self._lock:
+            return self._transcribe_locked(audio, language, hotwords)
+
+    def _transcribe_locked(self, audio, language: str, hotwords: str | None) -> Transcript:
         from faster_whisper.vad import VadOptions
 
         options = {

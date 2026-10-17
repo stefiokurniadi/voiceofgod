@@ -184,6 +184,13 @@ main.captions p.final { color: var(--ink); }
 .line-tools { display: flex; gap: 0.4rem; align-items: baseline; }
 .line-tools button { padding: 0.15rem 0.55rem; font-size: 0.75rem; }
 
+details { margin: 0.8rem 0; }
+.glossary-row { display: grid; grid-template-columns: 1fr 1fr auto; gap: 0.35rem; margin-bottom: 0.35rem; }
+.links { display: flex; gap: 0.8rem; flex-wrap: wrap; margin-top: 0.8rem; }
+html:has(body.overlay) { background: transparent; color-scheme: normal; }
+body.overlay, body.overlay main.captions { background: transparent; }
+body.overlay main.captions p { text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85); }
+
 @media (max-width: 800px) {
   .operator-grid, .columns { grid-template-columns: 1fr; }
   .side { border-right: 0; border-bottom: 1px solid var(--line); }

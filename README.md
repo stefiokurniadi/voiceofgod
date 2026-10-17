@@ -2,7 +2,7 @@
 
 Self-hosted live captions for a sermon. The operator sends the pulpit microphone from a browser. Listeners scan a QR code, pick English or Bahasa Indonesia, and follow along. There is no listener account and no app to install.
 
-Phase 1 is captions. Translated audio is later. One live session runs at a time.
+Phase 1 is captions. Phase 2 adds reconnect, up to four live sessions, a glossary editor, transcript downloads, an overlay page, and operator metrics. Translated audio is later.
 
 ## What you need
 
@@ -84,3 +84,9 @@ $env:VLLM_BASE_URL = ""
 - Restore puts back a line that was held because it looked like a long scripture reading.
 - Changing the speaker language affects only new audio.
 - Ending the session keeps the transcript on screen. Delete the session from the API when the church wants the transcript gone: `DELETE /api/sessions/{id}` with the `X-Operator-Token` header.
+- A dropped connection resumes from the last caption. Refreshing the page loads the whole transcript again.
+- The glossary editor saves terms for that session. The next sentence uses them. Earlier captions stay as they were.
+- TXT and SRT on the operator page are the listener transcript: hidden lines are left out, and a long scripture reading stays as the reference.
+- The overlay page is `/v/{session id}`. It is transparent so OBS or ProPresenter can key it. Add `?bg=black` when the source cannot use transparency.
+- Metrics show listener count and the last caption's speech, translation, and lag times. GPU utilisation appears when `nvidia-smi` is installed.
+- Up to four sessions can be live. They share one recognizer and one translator. A fifth start is refused.

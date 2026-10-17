@@ -68,6 +68,49 @@ class Glossary:
         phrases = list(dict.fromkeys([*self.do_not_translate, *(do_not_translate or [])]))
         return Glossary(list(by_en.values()), phrases)
 
+    def to_dict(self) -> dict:
+        return {
+            "do_not_translate": list(self.do_not_translate),
+            "terms": [
+                {"en": term.en, "id": term.id, "id_aliases": list(term.id_aliases)}
+                for term in self.terms
+            ],
+        }
+
+    @classmethod
+    def from_public(cls, terms: list[dict] | None, do_not_translate: list[str] | None) -> Glossary:
+        raw_terms = terms or []
+        raw_phrases = do_not_translate or []
+        if len(raw_terms) > 100 or len(raw_phrases) > 100:
+            raise ValueError("The glossary is too large.")
+        cleaned: list[Term] = []
+        for item in raw_terms:
+            if not isinstance(item, dict):
+                raise ValueError("Each glossary term needs an English and Indonesian side.")
+            english = str(item.get("en", "")).strip()
+            indonesian = str(item.get("id", "")).strip()
+            if not english and not indonesian:
+                continue
+            if not english or not indonesian:
+                raise ValueError("Each glossary term needs an English and Indonesian side.")
+            if len(english) > 80 or len(indonesian) > 80:
+                raise ValueError("A glossary phrase is too long.")
+            aliases = tuple(
+                str(alias).strip()
+                for alias in item.get("id_aliases") or []
+                if str(alias).strip()
+            )
+            cleaned.append(Term(english, indonesian, aliases))
+        phrases: list[str] = []
+        for phrase in raw_phrases:
+            text = str(phrase).strip()
+            if not text:
+                continue
+            if len(text) > 80:
+                raise ValueError("A do-not-translate phrase is too long.")
+            phrases.append(text)
+        return cls(cleaned, list(dict.fromkeys(phrases)))
+
     def source_pairs(self, source_language: str) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
         for term in self.terms:

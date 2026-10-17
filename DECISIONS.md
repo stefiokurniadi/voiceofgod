@@ -30,11 +30,11 @@ No Bible text and no lyrics are shipped. A book name plus chapter and verse is a
 
 ## Glossary
 
-Terms are masked with `[[T0]]` tokens before the model sees the sentence, then written back. Do-not-translate entries win over shorter glossary terms, so "Grace Church" is not turned into "anugerah Church". The model is also checked afterwards. Divine names are not in the seed list. A church sets those when it creates a session, once the editor exists. Until then, pass them in the create-session JSON or put names in the "do not translate" box.
+Terms are masked with `[[T0]]` tokens before the model sees the sentence, then written back. Do-not-translate entries win over shorter glossary terms, so "Grace Church" is not turned into "anugerah Church". The model is also checked afterwards. Divine names are not in the seed list. A church sets those in the operator glossary, or in the create-session form. Saving the glossary replaces that session's list. It does not rewrite captions that are already final.
 
-## One live session
+## Four live sessions
 
-Phase 1 refuses to start a second session while one is live. Session state is already keyed by id, so Phase 2 can raise the limit without a new storage design. Four concurrent pipelines is a Phase 2 measurement, not a number this phase claims.
+Up to four sessions can be live on one server. Each session has its own audio, glossary, and captions. They share one Whisper model and one translator, and recognition calls take a lock so two sessions cannot use the model at once. Listeners only receive captions. They do not load a model. A further start is refused while four are live.
 
 ## Development translator
 

@@ -24,7 +24,23 @@
         </select>
       </label>
       <p><a id="listener-link" href="">Listener link</a></p>
+      <div class="links">
+        <a id="overlay-link" href="" target="_blank">Overlay</a>
+        <a id="download-txt" href="">TXT</a>
+        <a id="download-srt" href="">SRT</a>
+      </div>
       <img id="qr" alt="QR code for the listener page">
+      <details>
+        <summary>Glossary</summary>
+        <div id="glossary-rows"></div>
+        <label>Do not translate
+          <textarea id="glossary-dnt" rows="3"></textarea>
+        </label>
+        <div class="controls">
+          <button type="button" id="glossary-add">Add term</button>
+          <button type="button" id="glossary-save">Save glossary</button>
+        </div>
+      </details>
       <p class="error" id="error"></p>
     </aside>
     <div class="columns">
@@ -50,6 +66,11 @@
     let audioContext = null;
     let stream = null;
     let snapshot = { lines: [] };
+    let lastLineId = "";
+    let lastSeq = 0;
+    let reconnectTimer = null;
+    let stopped = false;
+    let glossaryFilled = false;
 
     function fieldOriginal() { return "full_original"; }
     function fieldTranslation() { return "full_translation"; }
@@ -93,15 +114,72 @@
       await fetch(`/api/sessions/${sessionId}/lines/${lineId}/${action}`, { method: "POST", headers });
     }
 
-    function paint(next) {
+    function remember(event) {
+      if (event.seq) lastSeq = Math.max(lastSeq, event.seq);
+      for (const line of event.lines || []) {
+        if (line.state === "final") lastLineId = line.id;
+      }
+      if (event.line && event.line.state === "final") lastLineId = event.line.id;
+    }
+
+    function showMetrics(source) {
+      const lag = source && source.lag_ms;
+      const listeners = source && source.listeners;
+      const stt = source && source.stt_ms;
+      const translate = source && source.translate_ms;
+      const gpu = source && source.gpu;
+      const parts = [`Listeners ${listeners || 0}`];
+      if (lag != null) parts.push(`lag ${Math.round(lag)} ms`);
+      if (stt != null) parts.push(`speech ${Math.round(stt)} ms`);
+      if (translate != null) parts.push(`translate ${Math.round(translate)} ms`);
+      if (gpu) parts.push(`GPU ${Math.round(gpu.utilization_percent)}%`);
+      else if (source && Object.prototype.hasOwnProperty.call(source, "gpu")) parts.push("GPU unavailable");
+      metrics.textContent = parts.join(" · ");
+    }
+
+    function glossaryRow(english, indonesian, aliases) {
+      const row = document.createElement("div");
+      row.className = "glossary-row";
+      row.dataset.aliases = JSON.stringify(aliases || []);
+      const en = document.createElement("input");
+      en.placeholder = "English";
+      en.value = english || "";
+      const id = document.createElement("input");
+      id.placeholder = "Bahasa Indonesia";
+      id.value = indonesian || "";
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "Remove";
+      remove.addEventListener("click", () => row.remove());
+      row.append(en, id, remove);
+      return row;
+    }
+
+    function fillGlossary(glossary) {
+      if (glossaryFilled || !glossary) return;
+      glossaryFilled = true;
+      const rows = document.querySelector("#glossary-rows");
+      rows.replaceChildren();
+      for (const term of glossary.terms || []) rows.append(glossaryRow(term.en, term.id, term.id_aliases));
+      if (!(glossary.terms || []).length) rows.append(glossaryRow("", ""));
+      document.querySelector("#glossary-dnt").value = (glossary.do_not_translate || []).join("\n");
+    }
+
+    function paint(next, mode) {
       snapshot = next;
+      remember(next);
       banner.textContent = next.banner || next.status || "";
-      const lag = next.metrics && next.metrics.lag_ms;
-      const listeners = next.metrics && next.metrics.listeners;
-      metrics.textContent = `Listeners ${listeners || 0}` + (lag != null ? ` · last caption ${Math.round(lag)} ms` : "");
+      showMetrics(next.metrics);
       document.querySelector("#language").value = next.speaker_language || "en";
-      originalView.applySnapshot(withOperatorText(next));
-      translationView.applySnapshot(withOperatorText(next));
+      fillGlossary(next.glossary);
+      const rendered = withOperatorText(next);
+      if (mode === "resume") {
+        originalView.applyResume(rendered.lines, rendered.provisional);
+        translationView.applyResume(rendered.lines, rendered.provisional);
+      } else {
+        originalView.applySnapshot(rendered);
+        translationView.applySnapshot(rendered);
+      }
     }
 
     function withOperatorText(next) {
@@ -131,23 +209,30 @@
     }
 
     function connect() {
-      socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/operate/${sessionId}?k=${encodeURIComponent(token)}`);
+      const query = new URLSearchParams({ k: token });
+      if (lastLineId) query.set("after", lastLineId);
+      if (lastSeq) query.set("since", String(lastSeq));
+      socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/operate/${sessionId}?${query}`);
+      socket.onopen = () => { if (error.textContent === "Reconnecting…") error.textContent = ""; };
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data);
-        if (event.type === "snapshot") {
-          paint(event);
-          return;
-        }
-        if (event.metrics) {
-          metrics.textContent = `Listeners ${event.metrics.listeners || 0}` + (event.metrics.lag_ms != null ? ` · last caption ${Math.round(event.metrics.lag_ms)} ms` : "");
-        }
+        remember(event);
+        if (event.type === "deleted") { stopped = true; socket.close(); return; }
+        if (event.status === "ended") stopped = true;
+        if (event.type === "snapshot") { paint(event); return; }
+        if (event.type === "resume") { paint(event, "resume"); return; }
+        if (event.metrics) showMetrics(event.metrics);
         banner.textContent = event.banner || event.status || "";
         const line = event.line ? operatorLine(event.line) : null;
         const provisional = event.provisional ? operatorLine(event.provisional) : null;
         originalView.applyEvent({ ...event, line, provisional });
         translationView.applyEvent({ ...event, line, provisional });
       };
-      socket.onclose = () => setTimeout(connect, 1000);
+      socket.onclose = () => {
+        if (stopped || reconnectTimer) return;
+        error.textContent = "Reconnecting…";
+        reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 1000);
+      };
     }
 
     async function startMic() {
@@ -183,6 +268,7 @@
       }
     });
     document.querySelector("#stop").addEventListener("click", async () => {
+      stopped = true;
       await fetch(`/api/sessions/${sessionId}/stop`, { method: "POST", headers });
       if (stream) stream.getTracks().forEach((track) => track.stop());
     });
@@ -196,7 +282,31 @@
 
     const listenerUrl = `${location.origin}/l/${sessionId}`;
     document.querySelector("#listener-link").href = listenerUrl;
+    document.querySelector("#overlay-link").href = `${location.origin}/v/${sessionId}`;
+    document.querySelector("#download-txt").href = `/api/sessions/${sessionId}/export.txt?k=${encodeURIComponent(token)}`;
+    document.querySelector("#download-srt").href = `/api/sessions/${sessionId}/export.srt?k=${encodeURIComponent(token)}`;
     document.querySelector("#qr").src = `/api/sessions/${sessionId}/qr.svg?k=${encodeURIComponent(token)}`;
+    document.querySelector("#glossary-add").addEventListener("click", () => {
+      document.querySelector("#glossary-rows").append(glossaryRow("", ""));
+    });
+    document.querySelector("#glossary-save").addEventListener("click", async () => {
+      const terms = [...document.querySelectorAll("#glossary-rows .glossary-row")].map((row) => {
+        const [en, id] = row.querySelectorAll("input");
+        return { en: en.value.trim(), id: id.value.trim(), id_aliases: JSON.parse(row.dataset.aliases || "[]") };
+      }).filter((term) => term.en || term.id);
+      const doNotTranslate = document.querySelector("#glossary-dnt").value.split("\n").map((line) => line.trim()).filter(Boolean);
+      const response = await fetch(`/api/sessions/${sessionId}/glossary`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ terms, do_not_translate: doNotTranslate })
+      });
+      const body = await response.json();
+      error.textContent = response.ok ? "" : (body.detail || "Could not save the glossary.");
+    });
+    setInterval(async () => {
+      const response = await fetch(`/api/sessions/${sessionId}/metrics`, { headers });
+      if (response.ok) showMetrics(await response.json());
+    }, 5000);
     load().then(connect);
   </script>
 </body>
