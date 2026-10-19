@@ -162,6 +162,46 @@ def _duration_seconds(value) -> float:
         return 0.0
 
 
+SERMON_PHRASES = (
+    "grace of God",
+    "with you today",
+    "is with you",
+    "is preaching",
+    "preaching from",
+    "Holy Spirit",
+    "let us pray",
+    "after the service",
+    "quiet hearts",
+    "this Sunday morning",
+    "next Sunday",
+    "open the word",
+    "Brothers and sisters",
+    "salvation is a gift",
+    "own strength",
+    "heavy heart",
+    "verse sixteen",
+    "blessing of the cross",
+    "for the first time",
+    "the congregation is listening",
+)
+
+
+def speech_phrases(hotwords: str | None, limit: int = 40) -> list[str]:
+    """Church names first, then the sermon phrases, and never past the recognizer's limit."""
+    custom = []
+    for phrase in (hotwords or "").split(","):
+        text = phrase.strip()
+        if text and text not in custom:
+            custom.append(text)
+    reserved = [hint for hint in SERMON_PHRASES if hint not in custom]
+    room = max(0, limit - len(reserved))
+    chosen = custom[:room]
+    for hint in reserved:
+        if hint not in chosen:
+            chosen.append(hint)
+    return chosen[:limit]
+
+
 def _words_from_google(body: dict, duration: float) -> list[Word]:
     words: list[Word] = []
     for result in body.get("results") or []:
@@ -228,27 +268,7 @@ class GoogleRecognizer:
             return Transcript([])
         language_code = "id-ID" if language == "id" else "en-US"
         model = self.model if self.model and not self.model.startswith("chirp") else "latest_long"
-        phrases = [phrase.strip() for phrase in (hotwords or "").split(",") if phrase.strip()]
-        for hint in (
-            "grace of God",
-            "with you today",
-            "is with you",
-            "is preaching",
-            "preaching from",
-            "Holy Spirit",
-            "let us pray",
-            "open the word",
-            "Brothers and sisters",
-            "salvation is a gift",
-            "own strength",
-            "heavy heart",
-            "verse sixteen",
-            "blessing of the cross",
-            "for the first time",
-            "the congregation is listening",
-        ):
-            if hint not in phrases:
-                phrases.append(hint)
+        phrases = speech_phrases(hotwords)
         payload = {
             "config": {
                 "encoding": "LINEAR16",

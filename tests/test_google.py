@@ -12,7 +12,7 @@ from app.paths import GLOSSARY_PATH
 from app.pipeline import SessionPipeline
 from app.store import MemoryRepository
 from app.captions import Transcript, Word
-from app.stt import GoogleRecognizer, ScriptedRecognizer
+from app.stt import GoogleRecognizer, ScriptedRecognizer, speech_phrases
 from app.translator import GeminiTranslator, GlossaryTranslator, TranslationRequest
 from tests.test_phase1 import FAST, document, feed, speak
 
@@ -52,6 +52,10 @@ def test_chirp_pins_the_session_language():
     assert "salvation is a gift" in seen["body"]["config"]["speechContexts"][0]["phrases"]
     assert seen["url"].startswith("https://speech.googleapis.com/v1/speech:recognize")
     assert "key=" not in seen["url"]
+    crowded = speech_phrases(", ".join(f"name {index}" for index in range(45)))
+    assert len(crowded) == 40
+    assert "let us pray" in crowded
+    assert "after the service" in crowded
 
 
 @pytest.mark.asyncio

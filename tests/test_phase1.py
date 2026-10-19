@@ -167,6 +167,48 @@ def test_a_scrap_stays_on_the_line_it_continues():
     assert polish_translation("Roh Kudus Menghibur setiap orang.", {"Roh", "Kudus"}) == "Roh Kudus menghibur setiap orang."
 
 
+def test_a_bad_translation_does_not_change_what_was_said():
+    from app.pipeline import finish_translation
+
+    keep = {"Anda"}
+    assert finish_translation(
+        "My name is pastor John and I'm glad you are here in Jakarta this Sunday morning.",
+        "Nama saya pendeta john dan saya senang Anda ada di sini di jakarta pada minggu pagi ini.",
+        keep,
+    ) == "Nama saya pendeta John dan saya senang Anda ada di sini di Jakarta pada Minggu pagi ini."
+    assert finish_translation(
+        "I stood in the lobby after Of. Fire. Me.",
+        "Saya berdiri di lobi setelah of. Fire. Me.",
+        keep,
+    ) == "Saya berdiri di lobi setelah."
+    assert finish_translation(
+        "Son had been coming to Kids Kingdom for three months.",
+        "Anaknya telah datang ke kids kingdom selama tiga bulan.",
+        keep,
+    ) == "Anaknya telah datang ke Kids Kingdom selama tiga bulan."
+    assert finish_translation(
+        "Say the boy now is. Story. I do not want us to miss.",
+        "Katakan sekarang. Story. Dan ini adalah jenis cerita yang tidak ingin saya kita lewatkan.",
+        keep,
+    ) == "Katakan sekarang. Dan ini adalah jenis cerita yang tidak ingin kita lewatkan."
+    assert finish_translation(
+        "A male taken to a neighbor.",
+        "Seekor jantan yang dibawa ke tetangga.",
+        keep,
+    ) == "Seorang laki-laki yang dibawa ke tetangga."
+    assert finish_translation(
+        "Come back next Sunday at 10.",
+        "Datanglah kembali hari minggu depan pukul 10.00.",
+        keep,
+    ) == "Datanglah kembali hari Minggu depan pukul 10.00."
+    assert finish_translation(
+        "Raspberry Lord, thank you for this church.",
+        "Tuhan jesus, terima kasih atas gereja ini.",
+        keep,
+    ) == "Tuhan, terima kasih atas gereja ini."
+    assert finish_translation("Jesus is Lord.", "Yesus adalah Tuhan.", keep) == "Yesus adalah Tuhan."
+
+
 @pytest.mark.asyncio
 async def test_a_following_scrap_is_folded_into_the_open_line():
     pipe = pipeline_for(["pastor", "John", "chapter", "3."])

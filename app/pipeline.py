@@ -413,7 +413,7 @@ class SessionPipeline:
                 self.translator.translate(request),
                 timeout=self.config.translate_timeout_seconds,
             )
-            line.translation = polish_translation(translation, _keep_words(self.glossary))
+            line.translation = finish_translation(line.original, translation, _keep_words(self.glossary))
             line.glossary_miss = missing
             line.translate_ms = round((time.monotonic() - started) * 1000, 1)
         except Exception:
@@ -548,10 +548,11 @@ class SessionPipeline:
             provisional = self.doc.get("provisional")
             if not provisional or provisional["id"] != line_id:
                 return
-            provisional["translation"] = translation
+            repaired = finish_translation(text, translation, _keep_words(self.glossary))
+            provisional["translation"] = repaired
             provisional["glossary_miss"] = missing
             if not provisional.get("suppressed"):
-                provisional["listener_translation"] = translation
+                provisional["listener_translation"] = repaired
         await self._emit("state")
 
     async def _recognition_failed(self) -> None:
@@ -750,8 +751,80 @@ def _keep_words(glossary: Glossary) -> set[str]:
         words.update(term.id.split())
     for phrase in glossary.do_not_translate:
         words.update(phrase.split())
-    words.update({"Allah", "Anda", "Roh", "Kudus", "Yohanes", "Injil"})
+    words.update({"Allah", "Anda", "Roh", "Kudus", "Tuhan", "Yesus", "Yohanes", "Injil"})
     return {word.strip(".,;:") for word in words if word.strip(".,;:")}
+
+
+_NOT_A_NAME = {
+    "sunday", "lord", "god", "amen", "i",
+    "of", "the", "a", "an", "and", "to", "for", "in", "on", "at", "by", "or",
+}
+_JESUS = re.compile(r"\b(?:jesus|yesus|christ|kristus)\b", re.IGNORECASE)
+_ANIMAL = re.compile(r"\b(?:animal|animals|goat|lamb|sheep|ox|cattle|cow|bird|dog|cat|lion|fish)\b", re.IGNORECASE)
+
+
+def spoken_names(source: str) -> list[str]:
+    """Names the recognizer capitalized in the middle of a sentence."""
+    found: list[str] = []
+    for match in re.finditer(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b", source):
+        found.append(match.group(1))
+    masked = re.sub(r"(^|[.!?]\s+)([A-Z])", lambda item: item.group(1) + item.group(2).lower(), source)
+    covered = {part for phrase in found for part in phrase.split()}
+    for match in re.finditer(r"\b([A-Z][a-z]+)\b", masked):
+        word = match.group(1)
+        if word.casefold() in _NOT_A_NAME or word in covered:
+            continue
+        found.append(word)
+    return found
+
+
+def repair_translation(source: str, text: str, keep: set[str] | None = None) -> str:
+    """Correct translation mistakes that changed what the preacher said."""
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return cleaned
+    kept = {word.casefold() for word in (keep or set())}
+    kept.update({"amen", "hallelujah", "shalom"})
+    if not _JESUS.search(source):
+        cleaned = re.sub(r"\b(?:Yesus|yesus|Jesus|jesus)\b", "", cleaned)
+    cleaned = re.sub(r"\bsaya kita\b", "kita", cleaned, flags=re.IGNORECASE)
+    if re.search(r"\bSunday\b", source):
+        cleaned = re.sub(r"\bhari\s+minggu\b", "hari Minggu", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\bminggu(?=\s+(?:pagi|depan)\b)", "Minggu", cleaned)
+    if re.search(r"\bmale\b", source, re.IGNORECASE) and not _ANIMAL.search(source):
+        cleaned = re.sub(r"\bseekor jantan\b", "seorang laki-laki", cleaned, flags=re.IGNORECASE)
+    cleaned = _drop_copied_english(source, cleaned, kept)
+    for name in sorted(spoken_names(source), key=len, reverse=True):
+        cleaned = re.sub(rf"\b{re.escape(name)}\b", name, cleaned, flags=re.IGNORECASE)
+    cleaned = " ".join(cleaned.split())
+    cleaned = re.sub(r"\s+([,.;:!?])", r"\1", cleaned)
+    cleaned = re.sub(r"(?:\.\s*){2,}", ". ", cleaned)
+    return cleaned.strip()
+
+
+def _drop_copied_english(source: str, text: str, kept: set[str]) -> str:
+    source_words = {word.casefold() for word in re.findall(r"[A-Za-z']+", source)}
+    tokens = re.findall(r"[A-Za-z']+|[^A-Za-z']+", text)
+    words = [token for token in tokens if re.fullmatch(r"[A-Za-z']+", token)]
+    copied = [
+        word for word in words
+        if word.casefold() in source_words and word.casefold() not in kept and word.isascii()
+    ]
+    other = [word for word in words if word not in copied]
+    if len(other) < 2 or len(copied) > len(other):
+        return text
+    drop = {word.casefold() for word in copied}
+    return "".join(token for token in tokens if not (re.fullmatch(r"[A-Za-z']+", token) and token.casefold() in drop))
+
+
+def finish_translation(source: str, text: str, keep: set[str] | None = None) -> str:
+    kept = set(keep or ())
+    kept.update({"Tuhan", "Yesus", "Allah"})
+    for name in spoken_names(source):
+        kept.update(name.split())
+    if re.search(r"\bSunday\b", source):
+        kept.add("Minggu")
+    return polish_translation(repair_translation(source, text, kept), kept)
 
 
 def polish_translation(text: str, keep: set[str] | None = None) -> str:
