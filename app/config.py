@@ -23,6 +23,7 @@ class Settings(BaseSettings):
     admin_password: str = ""
     google_api_key: str = ""
     google_cloud_project: str = ""
+    google_application_credentials: str = ""
     google_speech_region: str = "us"
     google_speech_model: str = "chirp_3"
     gemini_api_key: str = ""

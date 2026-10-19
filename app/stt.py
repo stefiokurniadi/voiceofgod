@@ -231,8 +231,79 @@ def _words_from_google(body: dict, duration: float) -> list[Word]:
     return words
 
 
+_SPEECH_SCOPE = "https://www.googleapis.com/auth/cloud-platform"
+
+
+class _HttpxAuthResponse:
+    def __init__(self, response: httpx.Response):
+        self.status = response.status_code
+        self.headers = response.headers
+        self.data = response.content
+
+
+class _HttpxAuthRequest:
+    """Token refresh transport. google-auth's own transport needs the requests package."""
+
+    def __call__(self, url, method="GET", body=None, headers=None, timeout=None, **kwargs):
+        del kwargs
+        response = httpx.request(method, url, content=body, headers=headers, timeout=timeout or 30)
+        return _HttpxAuthResponse(response)
+
+
+def _load_google_credentials(path: str, project: str):
+    """A service-account file or a gcloud user login. Both are JSON."""
+    import json
+    from pathlib import Path
+
+    raw = json.loads(Path(path).read_text(encoding="utf-8"))
+    kind = raw.get("type")
+    if kind == "service_account":
+        from google.oauth2 import service_account
+
+        creds = service_account.Credentials.from_service_account_info(raw, scopes=[_SPEECH_SCOPE])
+    elif kind == "authorized_user":
+        from google.oauth2.credentials import Credentials
+
+        creds = Credentials.from_authorized_user_info(raw, scopes=[_SPEECH_SCOPE])
+    else:
+        raise RuntimeError("The Google credential file is neither a service account nor a user login.")
+    if project and hasattr(creds, "with_quota_project"):
+        creds = creds.with_quota_project(project)
+    return creds
+
+
+def chirp_request(pcm: bytes, language: str, hotwords: str | None, word_times: bool = False) -> dict:
+    """Speech-to-Text V2 body for one Chirp 3 clip.
+
+    Word timestamps and phrase hints together make Chirp return "not found",
+    so hints win. The pipeline estimates timing when the response has no words.
+    """
+    language_code = "id-ID" if language == "id" else "en-US"
+    features: dict = {"enableAutomaticPunctuation": True}
+    if word_times:
+        features["enableWordTimeOffsets"] = True
+    config: dict = {
+        "explicitDecodingConfig": {
+            "encoding": "LINEAR16",
+            "sampleRateHertz": SAMPLE_RATE,
+            "audioChannelCount": 1,
+        },
+        "languageCodes": [language_code],
+        "model": "chirp_3",
+        "features": features,
+    }
+    phrases = speech_phrases(hotwords, limit=200)
+    if phrases:
+        config["adaptation"] = {
+            "phraseSets": [{
+                "inlinePhraseSet": {"phrases": [{"value": phrase} for phrase in phrases]},
+            }]
+        }
+    return {"config": config, "content": base64.b64encode(pcm).decode("ascii")}
+
+
 class GoogleRecognizer:
-    """Speech-to-Text v1. Chirp 3 rejects an API key, so the key path uses latest_long."""
+    """Speech-to-Text. Chirp 3 uses V2 and a service account. An API key stays on v1."""
 
     def __init__(
         self,
@@ -242,16 +313,21 @@ class GoogleRecognizer:
         model: str = "chirp_3",
         timeout: float = 30.0,
         client: httpx.Client | None = None,
+        credentials_path: str = "",
+        token_provider=None,
     ):
         self.api_key = api_key
         self.project = project
         self.region = region or "us"
         self.model = model or "chirp_3"
         self.timeout = timeout
+        self.credentials_path = credentials_path or ""
+        self.token_provider = token_provider
         self.loaded = True
         self._client = client or httpx.Client(timeout=timeout)
         self._owns_client = client is None
         self._lock = threading.Lock()
+        self._credentials = None
         self.billed_once = True
 
     def ensure_loaded(self) -> None:
@@ -261,11 +337,62 @@ class GoogleRecognizer:
         if self._owns_client:
             self._client.close()
 
+    def _bearer(self) -> str | None:
+        if self.token_provider is not None:
+            token = self.token_provider()
+            return token or None
+        path = self.credentials_path
+        if not path:
+            return None
+        try:
+            from google.oauth2 import service_account  # noqa: F401
+        except ImportError:
+            logger.warning("google-auth is not installed, so Chirp 3 is unavailable")
+            return None
+        with self._lock:
+            if self._credentials is None:
+                self._credentials = _load_google_credentials(path, self.project)
+            if not self._credentials.valid:
+                self._credentials.refresh(_HttpxAuthRequest())
+            return self._credentials.token
+
+    def _chirp_ready(self) -> bool:
+        return bool(self.model.startswith("chirp") and self.project and (self.token_provider or self.credentials_path))
+
     def transcribe(self, audio, language: str, hotwords: str | None = None) -> Transcript:
         samples = np.asarray(audio if audio is not None else [], dtype=np.float32)
         pcm = float_to_pcm16(samples)
         if not pcm:
             return Transcript([])
+        if self._chirp_ready():
+            try:
+                return self._transcribe_chirp(samples, pcm, language, hotwords)
+            except Exception:
+                logger.exception("Chirp 3 failed for this clip; using the previous recognizer")
+        return self._transcribe_v1(samples, pcm, language, hotwords)
+
+    def _transcribe_chirp(self, samples, pcm: bytes, language: str, hotwords: str | None) -> Transcript:
+        token = self._bearer()
+        if not token:
+            raise RuntimeError("Chirp 3 has no Google login")
+        region = self.region
+        url = (
+            f"https://{region}-speech.googleapis.com/v2/projects/{self.project}"
+            f"/locations/{region}/recognizers/_:recognize"
+        )
+        headers = {"Authorization": f"Bearer {token}", "x-goog-user-project": self.project}
+        with self._lock:
+            response = self._client.post(url, headers=headers, json=chirp_request(pcm, language, hotwords), timeout=self.timeout)
+        if response.status_code == 400 and "WordTimeOffsets" in response.text:
+            with self._lock:
+                response = self._client.post(
+                    url, headers=headers, json=chirp_request(pcm, language, hotwords, word_times=False), timeout=self.timeout
+                )
+        response.raise_for_status()
+        duration = len(samples) / SAMPLE_RATE
+        return Transcript(_words_from_google(response.json(), duration))
+
+    def _transcribe_v1(self, samples, pcm: bytes, language: str, hotwords: str | None) -> Transcript:
         language_code = "id-ID" if language == "id" else "en-US"
         model = self.model if self.model and not self.model.startswith("chirp") else "latest_long"
         phrases = speech_phrases(hotwords)

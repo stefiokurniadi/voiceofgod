@@ -12,7 +12,7 @@ from app.paths import GLOSSARY_PATH
 from app.pipeline import SessionPipeline
 from app.store import MemoryRepository
 from app.captions import Transcript, Word
-from app.stt import GoogleRecognizer, ScriptedRecognizer, speech_phrases
+from app.stt import GoogleRecognizer, ScriptedRecognizer, _load_google_credentials, speech_phrases
 from app.translator import GeminiTranslator, GlossaryTranslator, TranslationRequest
 from tests.test_phase1 import FAST, document, feed, speak
 
@@ -56,6 +56,68 @@ def test_chirp_pins_the_session_language():
     assert len(crowded) == 40
     assert "let us pray" in crowded
     assert "after the service" in crowded
+
+
+def test_chirp_uses_speech_v2_when_a_service_account_is_available():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "alternatives": [
+                            {
+                                "transcript": "let us pray",
+                                "words": [
+                                    {"word": "let", "startOffset": "0s", "endOffset": "0.200s"},
+                                    {"word": "us", "startOffset": "0.200s", "endOffset": "0.300s"},
+                                    {"word": "pray", "startOffset": "0.300s", "endOffset": "0.600s"},
+                                ],
+                            }
+                        ]
+                    }
+                ]
+            },
+        )
+
+    recognizer = GoogleRecognizer(
+        "key",
+        "church-project",
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+        token_provider=lambda: "ya29.test",
+    )
+    transcript = recognizer.transcribe(np.full(1600, 0.2, dtype=np.float32), "en", "Pastor John")
+    assert [word.text for word in transcript.words] == ["let", "us", "pray"]
+    assert transcript.words[2].end == pytest.approx(0.6)
+    assert seen["url"] == "https://us-speech.googleapis.com/v2/projects/church-project/locations/us/recognizers/_:recognize"
+    assert seen["auth"] == "Bearer ya29.test"
+    assert seen["body"]["config"]["model"] == "chirp_3"
+    assert seen["body"]["config"]["languageCodes"] == ["en-US"]
+    assert seen["body"]["config"]["features"]["enableAutomaticPunctuation"] is True
+    assert "enableWordTimeOffsets" not in seen["body"]["config"]["features"]
+    phrases = seen["body"]["config"]["adaptation"]["phraseSets"][0]["inlinePhraseSet"]["phrases"]
+    assert {"value": "Pastor John"} in phrases
+    assert "key" not in seen["url"]
+
+
+def test_a_user_login_file_can_call_chirp(tmp_path):
+    path = tmp_path / "adc.json"
+    path.write_text(
+        json.dumps({
+            "type": "authorized_user",
+            "client_id": "client",
+            "client_secret": "secret",
+            "refresh_token": "refresh",
+        }),
+        encoding="utf-8",
+    )
+    creds = _load_google_credentials(str(path), "church-project")
+    assert creds.quota_project_id == "church-project"
 
 
 @pytest.mark.asyncio

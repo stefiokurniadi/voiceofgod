@@ -31,6 +31,7 @@ def build_recognizer(settings: Settings):
             settings.google_cloud_project,
             settings.google_speech_region,
             settings.google_speech_model,
+            credentials_path=settings.google_application_credentials,
         )
     if settings.allow_fake_models and not settings.whisper_model:
         return ScriptedRecognizer([])

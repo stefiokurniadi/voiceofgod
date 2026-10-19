@@ -4,6 +4,9 @@ __pycache__/
 .mypy_cache/
 *.pyc
 .env
+google-speech.json
+*-speech.json
+google-login.json
 data/
 .models/
 eval/results/

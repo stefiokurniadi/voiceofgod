@@ -72,7 +72,7 @@ $env:VLLM_BASE_URL = ""
 
 ## Google speech, Gemini, and voice
 
-This path does not need the GPU. Set `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, and a paid `GEMINI_API_KEY` in `.env`. Leave `VLLM_BASE_URL` empty if Gemini should translate. Speech-to-Text v1 hears the microphone, Gemini 3.5 Flash translates with thinking off, and WaveNet speaks the final translation. Listeners tap Listen and should use headphones so the pulpit microphone cannot hear the voice. Captions still work if a clip fails. Pastor name, church name, and verse references are not sent yet. Do not put a Bible text in the prompt.
+This path does not need the GPU. Set `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, and a paid `GEMINI_API_KEY` in `.env`. Leave `VLLM_BASE_URL` empty if Gemini should translate. Chirp 3 hears the microphone when `GOOGLE_APPLICATION_CREDENTIALS` points at the user-login file from `gcloud auth application-default login`. A service-account JSON file also works, when the organization allows one. Without that file, Speech-to-Text v1 hears it. Gemini 3.5 Flash translates with thinking off, and WaveNet speaks the final translation. Listeners tap Listen and should use headphones so the pulpit microphone cannot hear the voice. Captions still work if a clip fails. Pastor name, church name, and verse references are not sent yet. Do not put a Bible text in the prompt.
 
 ## OBS and ProPresenter
 
