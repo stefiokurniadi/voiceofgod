@@ -34,6 +34,10 @@ class MemoryRepository:
         async with self._lock:
             self.sessions.pop(session_id, None)
 
+    async def list_ids(self) -> list[str]:
+        async with self._lock:
+            return list(self.sessions)
+
     async def publish(self, session_id: str, event: dict) -> None:
         async with self._lock:
             queues = list(self._subscribers.get(session_id, []))
@@ -93,6 +97,7 @@ class RedisRepository:
 
     async def save(self, session_id: str, document: dict) -> None:
         await self.redis.set(self._key(session_id), json.dumps(document))
+        await self.redis.sadd("voiceofgod:sessions", session_id)
 
     async def load(self, session_id: str) -> dict | None:
         raw = await self.redis.get(self._key(session_id))
@@ -102,6 +107,16 @@ class RedisRepository:
 
     async def delete(self, session_id: str) -> None:
         await self.redis.delete(self._key(session_id))
+        await self.redis.srem("voiceofgod:sessions", session_id)
+
+    async def list_ids(self) -> list[str]:
+        ids = await self.redis.smembers("voiceofgod:sessions")
+        if ids:
+            return list(ids)
+        found = []
+        async for key in self.redis.scan_iter("voiceofgod:session:*"):
+            found.append(str(key).removeprefix("voiceofgod:session:"))
+        return found
 
     async def publish(self, session_id: str, event: dict) -> None:
         await self.redis.publish(self._channel(session_id), json.dumps(event))

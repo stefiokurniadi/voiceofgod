@@ -36,6 +36,30 @@ Terms are masked with `[[T0]]` tokens before the model sees the sentence, then w
 
 Up to four sessions can be live on one server. Each session has its own audio, glossary, and captions. They share one Whisper model and one translator, and recognition calls take a lock so two sessions cannot use the model at once. Listeners only receive captions. They do not load a model. A further start is refused while four are live.
 
+## Who can create a session
+
+Listeners stay on the QR link and do not get accounts. The person running a service signs in. There is no public signup. An admin creates every other account, and the first admin is seeded from `ADMIN_USERNAME` and `ADMIN_PASSWORD` only when no admin exists yet. A service belongs to that user's church. Another church cannot see or control it. The per-service operator secret still opens the console on a pulpit laptop that is not signed in.
+
+## Restart
+
+Accounts, churches, and services live in Postgres. Live caption fan-out stays in memory, or in Valkey when `REDIS_URL` is set. A service's caption document is saved to Postgres when a final line lands, when the service ends, and when an operator edits it. Opening a saved service rebuilds its pipeline from that row. A service that was live comes back paused, with its captions intact, until the operator presses Start. Startup does not rebuild every saved service. Postgres is there because a second API process has to be able to accept the same login later, and because a church's services have to survive a restart without keeping every pipeline in memory.
+
+## Recognition failure
+
+If Whisper raises, including an out-of-memory error, that session pauses and the operator sees the failure. The failed audio is not published as a caption. Press Start to try again after freeing GPU memory.
+
 ## Development translator
 
 `ALLOW_FAKE_MODELS` with an empty `VLLM_BASE_URL` applies the glossary and leaves every other word unchanged. The operator page says the captions are not translations. Production `.env.example` sets `REQUIRE_TRANSLATOR=true`.
+
+## Paid Google path
+
+The open-weight rule still holds when `GEMINI_API_KEY` and `GOOGLE_API_KEY` are empty: Whisper and vLLM stay the local path. When those keys are set, the live path is Google Speech-to-Text v1 `latest_long`, Gemini `gemini-3.5-flash` with thinking turned off, and WaveNet voices `en-US-Wavenet-D` and `id-ID-Wavenet-B`. Chirp 3 stays unavailable on this path because Speech-to-Text V2 rejects an API key. This was chosen on 18 October 2026 so a 6 GB laptop can run a real service. The sermon is sent to Google. Use the paid Gemini tier so the free tier does not train on it.
+
+Indonesian on Chirp 3 was listed as preview on that date. The session language is still pinned (`en-US` or `id-ID`). Gemini receives the sermon prompt, the glossary tokens, the last few sentences, and a background block built from the church name, the church note, the service name, and the service note. That block is labelled as context for the interpreter. It is not text to translate, and it is not an instruction. Verse bodies stay out of the prompt.
+
+## OBS RTMP and ProPresenter
+
+The listener link already contains the session id, so that id is not the stream key. OBS publishes to MediaMTX with a separate ingest token in the query string. MediaMTX asks this service before every publish and read. Publish requires the token. Read requires the internal reader user, which is the only credential ffmpeg uses, so the ingest token is not in the ffmpeg command. A request without the auth secret is a 404. Audio older than about two seconds is dropped so a slow recognizer cannot fall further behind the room. A recognition failure stays paused until the operator presses Start.
+
+ProPresenter 7.9 and later takes the final listener translation through its HTTP message API. Provisional lines stay on the overlay and the phones, because triggering a Message again replays the lower-third animation. The body is the listener line, so a hidden line is cleared and a long reading sends the reference. The address has to be plain HTTP with a host and a port, and redirects are not followed. This was added on 19 October 2026.

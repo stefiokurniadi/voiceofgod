@@ -21,7 +21,7 @@ cd voiceofgod
 cp .env.example .env
 ```
 
-Edit `.env` and set `PUBLIC_BASE_URL` to the HTTPS origin listeners will open, for example `https://captions.example.org`.
+Edit `.env` and set `PUBLIC_BASE_URL` to the HTTPS origin listeners will open, for example `https://captions.example.org`. Set `DATABASE_URL`, and set `ADMIN_USERNAME` and `ADMIN_PASSWORD` for the first start. Sign in at `/login`. The admin creates every other account. Listeners never sign in.
 
 If the machine's CUDA driver is 12.x rather than 13, set `VLLM_IMAGE=vllm/vllm-openai:v0.31.0-cu129` in `.env`.
 
@@ -46,6 +46,9 @@ The caption pipeline and both pages can be exercised without models:
 ```bash
 python -m venv .venv
 .venv\Scripts\python -m pip install -e ".[dev]"
+$env:DATABASE_URL = "postgresql://voiceofgod:password@127.0.0.1:5433/voiceofgod"
+$env:ADMIN_USERNAME = "admin"
+$env:ADMIN_PASSWORD = "replace-with-a-long-password"
 $env:ALLOW_FAKE_MODELS = "true"
 $env:WHISPER_DEVICE = "fake"
 $env:REQUIRE_TRANSLATOR = "false"
@@ -67,6 +70,18 @@ $env:REQUIRE_TRANSLATOR = "false"
 $env:VLLM_BASE_URL = ""
 ```
 
+## Google speech, Gemini, and voice
+
+This path does not need the GPU. Set `GOOGLE_API_KEY`, `GOOGLE_CLOUD_PROJECT`, and a paid `GEMINI_API_KEY` in `.env`. Leave `VLLM_BASE_URL` empty if Gemini should translate. Speech-to-Text v1 hears the microphone, Gemini 3.5 Flash translates with thinking off, and WaveNet speaks the final translation. Listeners tap Listen and should use headphones so the pulpit microphone cannot hear the voice. Captions still work if a clip fails. Pastor name, church name, and verse references are not sent yet. Do not put a Bible text in the prompt.
+
+## OBS and ProPresenter
+
+The operator page can take the pulpit from OBS instead of the browser microphone. Install ffmpeg and [MediaMTX](https://github.com/bluenviron/mediamtx) v1.13.1, and set `RTMP_PUBLIC_URL`, `MEDIAMTX_RTMP_URL`, `RTMP_AUTH_SECRET`, and `RTMP_READ_PASSWORD` in `.env`. Use letters and numbers for both secrets. Point MediaMTX at this repo's `mediamtx.yml` with `RTMP_AUTH_URL` set to `http://127.0.0.1:8080/internal/rtmp-auth/` plus the same auth secret. Docker Compose starts MediaMTX and overrides the pull address to `rtmp://mediamtx:1935`.
+
+On the operator page choose OBS RTMP. OBS uses a custom stream: the server and stream key are on that page. Stream the pulpit or speech bus. A program mix that includes music, videos, or the room will be captioned. RTMP adds delay on top of speech and translation. Port 1935 has to be reachable from the OBS computer. It is not carried on the HTTPS proxy.
+
+The overlay at `/v/{session}` stays available for a ProPresenter web layer or a browser. Add `?bg=black` when that source cannot use transparency. To put the translation in a ProPresenter lower third, enable Network in ProPresenter 7.9 or later, create a Message whose theme contains `{Translation}`, and set Dismiss to manually. Save the ProPresenter address, message name, and token name on the operator page. Use the ProPresenter computer's LAN address. `127.0.0.1` reaches ProPresenter only when the caption service runs on that same computer. From the API container it does not. ProPresenter receives each final translation. The overlay and the phones still show the grey in-progress line. If ProPresenter does not answer, captions continue.
+
 ## Tests and eval
 
 ```bash
@@ -83,8 +98,9 @@ $env:VLLM_BASE_URL = ""
 - Hide removes a bad line from phones that are already open.
 - Restore puts back a line that was held because it looked like a long scripture reading.
 - Changing the speaker language affects only new audio.
-- Ending the session keeps the transcript on screen. Delete the session from the API when the church wants the transcript gone: `DELETE /api/sessions/{id}` with the `X-Operator-Token` header.
+- Ending the session keeps the transcript on screen. Delete transcript removes it from the server and from phones that are open.
 - A dropped connection resumes from the last caption. Refreshing the page loads the whole transcript again.
+- If the API process restarts, Valkey still has the transcript. The session comes back paused. Press Start to continue. Listeners keep the lines they already have.
 - The glossary editor saves terms for that session. The next sentence uses them. Earlier captions stay as they were.
 - TXT and SRT on the operator page are the listener transcript: hidden lines are left out, and a long scripture reading stays as the reference.
 - The overlay page is `/v/{session id}`. It is transparent so OBS or ProPresenter can key it. Add `?bg=black` when the source cannot use transparency.

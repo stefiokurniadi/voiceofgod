@@ -2,68 +2,229 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex">
-  <title>Operator</title>
+  <meta name="theme-color" content="#141417">
+  <title>Console · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="operator">
+  <header class="console-bar">
+    <a class="console-back" href="/" id="back" aria-label="All services" title="All services">←</a>
+    <div class="console-title">
+      <h1 id="service-title">Service</h1>
+      <p id="service-sub"></p>
+    </div>
+    <div class="console-status">
+      <span class="badge badge-ready" id="status">Ready</span>
+      <div class="metrics" id="metrics"></div>
+    </div>
+    <div class="console-actions">
+      <button class="btn-primary btn-lg" id="start" type="button" aria-pressed="false">Start captions</button>
+      <button class="btn-lg" id="stop" type="button" aria-pressed="false">End</button>
+    </div>
+  </header>
+  <p class="console-notice error" id="error" role="alert"></p>
+  <p class="console-notice" id="banner" aria-live="polite"></p>
+
   <div class="operator-grid">
     <aside class="side">
-      <h1 style="font-size:1.6rem">Operator</h1>
-      <p class="banner" id="banner"></p>
-      <p id="metrics"></p>
-      <div class="controls">
-        <button class="primary" id="start" type="button">Start</button>
-        <button id="stop" type="button">End</button>
+      <div class="tabs" role="tablist" aria-label="Console">
+        <button type="button" role="tab" id="tab-audio" aria-controls="panel-audio" aria-selected="true">Audio</button>
+        <button type="button" role="tab" id="tab-share" aria-controls="panel-share" aria-selected="false">Share</button>
+        <button type="button" role="tab" id="tab-glossary" aria-controls="panel-glossary" aria-selected="false">Glossary</button>
+        <button type="button" role="tab" id="tab-stage" aria-controls="panel-stage" aria-selected="false">ProPresenter</button>
       </div>
-      <label>Speaker language
-        <select id="language">
-          <option value="en">English</option>
-          <option value="id">Bahasa Indonesia</option>
-        </select>
-      </label>
-      <p><a id="listener-link" href="">Listener link</a></p>
-      <div class="links">
-        <a id="overlay-link" href="" target="_blank">Overlay</a>
-        <a id="download-txt" href="">TXT</a>
-        <a id="download-srt" href="">SRT</a>
-      </div>
-      <img id="qr" alt="QR code for the listener page">
-      <details>
-        <summary>Glossary</summary>
-        <div id="glossary-rows"></div>
-        <label>Do not translate
-          <textarea id="glossary-dnt" rows="3"></textarea>
-        </label>
-        <div class="controls">
-          <button type="button" id="glossary-add">Add term</button>
-          <button type="button" id="glossary-save">Save glossary</button>
+
+      <div class="tab-panel" role="tabpanel" id="panel-audio" aria-labelledby="tab-audio">
+        <div class="section">
+          <h3>Input</h3>
+          <canvas id="wave" class="wave" width="640" height="96" aria-label="Microphone waveform"></canvas>
+          <div class="field">
+            <label for="source">Audio source</label>
+            <select id="source">
+              <option value="browser">This computer's microphone</option>
+              <option value="rtmp">OBS stream (RTMP)</option>
+            </select>
+            <p class="hint">Change the source while the service is not running.</p>
+          </div>
+          <section id="rtmp-box" hidden>
+            <p class="alert info">RTMP adds a little delay. Send the pulpit or speech mix, not the full program with music and videos.</p>
+            <div class="field">
+              <label for="rtmp-server">OBS server</label>
+              <div class="input-group">
+                <input id="rtmp-server" type="text" readonly spellcheck="false">
+                <button class="btn" type="button" data-copy="#rtmp-server" data-label="Server">Copy</button>
+              </div>
+            </div>
+            <div class="field">
+              <label for="rtmp-key">OBS stream key</label>
+              <div class="input-group">
+                <input id="rtmp-key" type="text" readonly spellcheck="false" autocomplete="off">
+                <button class="btn" type="button" data-copy="#rtmp-key" data-label="Stream key">Copy</button>
+              </div>
+            </div>
+          </section>
         </div>
-      </details>
-      <p class="error" id="error"></p>
+        <div class="section">
+          <h3>Translation</h3>
+          <div class="field">
+            <label for="language">The preacher speaks</label>
+            <select id="language">
+              <option value="en">English</option>
+              <option value="id">Bahasa Indonesia</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="switch">
+              <input type="checkbox" id="voice" role="switch">
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text">
+                <strong>Spoken translation</strong>
+                <small>Listeners can tap Listen to hear each line.</small>
+              </span>
+            </label>
+          </div>
+        </div>
+        <div class="section">
+          <h3>Transcript</h3>
+          <div class="button-row">
+            <a class="btn btn-sm" id="download-txt" href="">Download TXT</a>
+            <a class="btn btn-sm" id="download-srt" href="">Download SRT</a>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-sm btn-danger" id="delete" type="button">Delete service</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-share" aria-labelledby="tab-share" hidden>
+        <div class="section">
+          <h3>Listeners</h3>
+          <div class="qr-card">
+            <img id="qr" alt="QR code for the listener page">
+            <p>Show this on screen. Listeners scan it with their phone camera. No app or account needed.</p>
+          </div>
+          <div class="field">
+            <label for="listener-url">Listener link</label>
+            <div class="input-group">
+              <input id="listener-url" type="text" readonly>
+              <button class="btn" type="button" data-copy="#listener-url" data-label="Listener link">Copy</button>
+            </div>
+            <a id="listener-link" href="" target="_blank" rel="noopener">Open the listener page ↗</a>
+          </div>
+        </div>
+        <div class="section">
+          <h3>Screens and streams</h3>
+          <div class="field">
+            <label for="overlay-url">Caption overlay</label>
+            <div class="input-group">
+              <input id="overlay-url" type="text" readonly>
+              <button class="btn" type="button" data-copy="#overlay-url" data-label="Overlay link">Copy</button>
+            </div>
+            <p class="hint" id="overlay-note">Add it as a browser source in OBS or a web layer in ProPresenter. Add ?bg=black when the source cannot use transparency.</p>
+            <a id="overlay-link" href="" target="_blank" rel="noopener">Open the overlay ↗</a>
+          </div>
+        </div>
+        <div class="section" id="pulpit-section" hidden>
+          <h3>Pulpit laptop</h3>
+          <div class="field">
+            <label for="pulpit-url">Console link without signing in</label>
+            <div class="input-group">
+              <input id="pulpit-url" type="text" readonly>
+              <button class="btn" type="button" data-copy="#pulpit-url" data-label="Console link">Copy</button>
+            </div>
+            <p class="hint">Anyone with this link can run and end this service. Keep it private.</p>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-glossary" aria-labelledby="tab-glossary" hidden>
+        <div class="section">
+          <h3>Terms</h3>
+          <p class="hint" style="margin-bottom:0.85rem">Fixed translations for this service. Changes apply to the next sentence.</p>
+          <div class="glossary-head"><span class="label">English</span><span class="label">Bahasa Indonesia</span><span></span></div>
+          <div id="glossary-rows"></div>
+          <button class="btn btn-sm" type="button" id="glossary-add">+ Add term</button>
+        </div>
+        <div class="section">
+          <h3>Keep as spoken</h3>
+          <div class="field">
+            <label for="glossary-dnt" class="visually-hidden">Names to keep as spoken</label>
+            <textarea id="glossary-dnt" rows="4"></textarea>
+            <p class="hint">One per line. Names and phrases that are never translated.</p>
+          </div>
+          <div class="button-row">
+            <button class="btn btn-primary" type="button" id="glossary-save">Save glossary</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="tab-panel" role="tabpanel" id="panel-stage" aria-labelledby="tab-stage" hidden>
+        <div class="section">
+          <h3>ProPresenter message</h3>
+          <label class="switch">
+            <input type="checkbox" id="pp-enabled" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <strong>Show each translated line</strong>
+              <small>Sends finished lines to a ProPresenter Message.</small>
+            </span>
+          </label>
+          <div class="field">
+            <label for="pp-url">ProPresenter address</label>
+            <input id="pp-url" type="text" placeholder="http://192.168.1.20:50001" spellcheck="false" autocomplete="off">
+            <p class="hint">Enable Network in ProPresenter. Use that computer's LAN address. 127.0.0.1 works only when captions run on the same computer.</p>
+          </div>
+          <div class="field-row">
+            <div class="field">
+              <label for="pp-message">Message name</label>
+              <input id="pp-message" type="text" placeholder="Live Translator" autocomplete="off">
+            </div>
+            <div class="field">
+              <label for="pp-token">Token name</label>
+              <input id="pp-token" type="text" value="Translation" autocomplete="off">
+            </div>
+          </div>
+          <p class="hint" style="margin-top:0.85rem">Create one Message with {Translation} in a lower-third theme with a transparent background.</p>
+          <div class="button-row">
+            <button class="btn btn-primary" type="button" id="pp-save">Save</button>
+            <button class="btn" type="button" id="pp-test">Send a test</button>
+          </div>
+        </div>
+      </div>
     </aside>
+
     <div class="columns">
-      <section>
-        <h2>Original</h2>
+      <section aria-labelledby="original-head">
+        <div class="column-head"><h2 id="original-head">Original</h2><span id="original-lang">English</span></div>
         <main class="captions" id="original" data-size="2"></main>
       </section>
-      <section>
-        <h2>Translation</h2>
+      <section aria-labelledby="translation-head">
+        <div class="column-head"><h2 id="translation-head">Translation</h2><span id="translation-lang">Bahasa Indonesia</span></div>
         <main class="captions" id="translation" data-size="2"></main>
       </section>
     </div>
   </div>
+  <script src="/static/ui.js"></script>
   <script src="/static/captions.js"></script>
   <script>
     const sessionId = location.pathname.split("/").filter(Boolean).pop();
     const token = new URLSearchParams(location.search).get("k") || "";
+    const pulpitSecret = token || sessionStorage.getItem(`voiceofgod-secret-${sessionId}`) || "";
     const banner = document.querySelector("#banner");
     const metrics = document.querySelector("#metrics");
     const error = document.querySelector("#error");
-    const headers = { "X-Operator-Token": token, "content-type": "application/json" };
+    const statusBadge = document.querySelector("#status");
+    const startButton = document.querySelector("#start");
+    const stopButton = document.querySelector("#stop");
+    const headers = { "content-type": "application/json" };
+    if (token) headers["X-Operator-Token"] = token;
+    let starting = false;
     let socket = null;
     let audioContext = null;
+    let captureNode = null;
     let stream = null;
     let snapshot = { lines: [] };
     let lastLineId = "";
@@ -71,16 +232,36 @@
     let reconnectTimer = null;
     let stopped = false;
     let glossaryFilled = false;
+    let outputFilled = false;
+    let inputMode = "browser";
+    let rtmpLevels = [];
 
-    function fieldOriginal() { return "full_original"; }
-    function fieldTranslation() { return "full_translation"; }
     const originalView = CaptionView(document.querySelector("#original"), {
       fieldOf: () => "full_original",
-      decorate: decorate
+      decorate: decorate,
+      keepHidden: true
     });
     const translationView = CaptionView(document.querySelector("#translation"), {
-      fieldOf: () => "full_translation"
+      fieldOf: () => "full_translation",
+      keepHidden: true,
+      finalsOnly: true
     });
+
+    for (const tab of document.querySelectorAll("[role=tab]")) {
+      tab.addEventListener("click", () => {
+        for (const other of document.querySelectorAll("[role=tab]")) {
+          const selected = other === tab;
+          other.setAttribute("aria-selected", selected ? "true" : "false");
+          document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
+        }
+      });
+    }
+
+    for (const button of document.querySelectorAll("[data-copy]")) {
+      button.addEventListener("click", () => {
+        UI.copy(document.querySelector(button.dataset.copy).value, button.dataset.label);
+      });
+    }
 
     function decorate(node, line) {
       let tools = node.querySelector(".line-tools");
@@ -91,27 +272,35 @@
       if (!tools) {
         tools = document.createElement("span");
         tools.className = "line-tools";
-        const hide = document.createElement("button");
-        hide.type = "button";
-        hide.textContent = "Hide";
-        hide.addEventListener("click", () => act(line.id, "hide"));
-        tools.appendChild(hide);
         node.appendChild(tools);
       }
+      let hide = tools.querySelector("[data-hide]");
+      if (!line.hidden && !hide) {
+        hide = document.createElement("button");
+        hide.type = "button";
+        hide.dataset.hide = "1";
+        hide.textContent = "Hide";
+        hide.title = "Hide this line from listeners";
+        hide.addEventListener("click", () => act(line.id, "hide"));
+        tools.appendChild(hide);
+      }
+      if (line.hidden && hide) hide.remove();
       let restore = tools.querySelector("[data-restore]");
-      if (line.suppressed && !restore) {
+      const needsRestore = line.hidden || line.suppressed;
+      if (needsRestore && !restore) {
         restore = document.createElement("button");
         restore.type = "button";
         restore.dataset.restore = "1";
-        restore.textContent = "Restore";
         restore.addEventListener("click", () => act(line.id, "restore"));
         tools.appendChild(restore);
       }
-      if (!line.suppressed && restore) restore.remove();
+      if (restore && needsRestore) restore.textContent = line.hidden ? "Show" : "Restore";
+      if (!needsRestore && restore) restore.remove();
     }
 
     async function act(lineId, action) {
-      await fetch(`/api/sessions/${sessionId}/lines/${lineId}/${action}`, { method: "POST", headers });
+      const response = await fetch(`/api/sessions/${sessionId}/lines/${lineId}/${action}`, { method: "POST", headers });
+      if (!response.ok) UI.toast("Could not change that line.", "error");
     }
 
     function remember(event) {
@@ -122,19 +311,152 @@
       if (event.line && event.line.state === "final") lastLineId = event.line.id;
     }
 
+    let waveTimer = 0;
+    let analyser = null;
+
+    function setRunning(on) {
+      startButton.classList.toggle("live", on);
+      stopButton.classList.toggle("live", on);
+      startButton.textContent = on ? "Live" : (snapshot.status === "paused" ? "Resume captions" : "Start captions");
+      startButton.setAttribute("aria-pressed", on ? "true" : "false");
+      stopButton.setAttribute("aria-pressed", on ? "true" : "false");
+    }
+
+    function setStatus(status) {
+      UI.setBadge(statusBadge, status);
+      document.title = `${status === "live" ? "● " : ""}${snapshot.service_name || "Console"} · voiceofgod`;
+    }
+
+    function setBanner(status, text) {
+      banner.textContent = status === "ended" ? "This service has ended. Press Start to continue it." : (text || "");
+    }
+
+    function setLanguage(speaker) {
+      document.querySelector("#language").value = speaker;
+      const names = UI.LANGUAGES;
+      document.querySelector("#original-lang").textContent = names[speaker] || "";
+      document.querySelector("#translation-lang").textContent = names[speaker === "en" ? "id" : "en"];
+      const parts = [];
+      if (snapshot.church_name) parts.push(snapshot.church_name);
+      parts.push(UI.languagePair(speaker));
+      document.querySelector("#service-sub").textContent = parts.join(" · ");
+    }
+
+    function setSourceLocked(status) {
+      document.querySelector("#source").disabled = status === "live" || status === "paused";
+    }
+
+    function showSource() {
+      const rtmp = inputMode === "rtmp";
+      document.querySelector("#rtmp-box").hidden = !rtmp;
+      document.querySelector("#wave").setAttribute("aria-label", rtmp ? "OBS audio level" : "Microphone waveform");
+    }
+
+    function fillOutput(next) {
+      if (outputFilled || !next || !next.rtmp) return;
+      outputFilled = true;
+      inputMode = next.input || "browser";
+      document.querySelector("#source").value = inputMode;
+      document.querySelector("#rtmp-server").value = next.rtmp.server || "";
+      document.querySelector("#rtmp-key").value = next.rtmp.stream_key || "";
+      const stage = next.propresenter || {};
+      document.querySelector("#pp-enabled").checked = Boolean(stage.enabled);
+      document.querySelector("#pp-url").value = stage.base_url || "";
+      document.querySelector("#pp-message").value = stage.message || "";
+      document.querySelector("#pp-token").value = stage.token || "Translation";
+      showSource();
+    }
+
+    function propresenterBody() {
+      return {
+        enabled: document.querySelector("#pp-enabled").checked,
+        base_url: document.querySelector("#pp-url").value.trim(),
+        message: document.querySelector("#pp-message").value.trim(),
+        token: document.querySelector("#pp-token").value.trim() || "Translation"
+      };
+    }
+
+    function drawWave() {
+      const canvas = document.querySelector("#wave");
+      const ctx = canvas.getContext("2d");
+      const width = canvas.clientWidth;
+      const height = canvas.clientHeight;
+      const ratio = window.devicePixelRatio || 1;
+      if (canvas.width !== Math.floor(width * ratio) || canvas.height !== Math.floor(height * ratio)) {
+        canvas.width = Math.floor(width * ratio);
+        canvas.height = Math.floor(height * ratio);
+      }
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      const audible = inputMode === "rtmp" ? snapshot.status === "live" : Boolean(stream);
+      ctx.strokeStyle = audible ? "#f2b84b" : "#4a4a52";
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      if (inputMode === "rtmp") {
+        if (!rtmpLevels.length) {
+          ctx.moveTo(0, height / 2);
+          ctx.lineTo(width, height / 2);
+          ctx.stroke();
+          return;
+        }
+        rtmpLevels.forEach((level, index) => {
+          const x = (index / Math.max(rtmpLevels.length - 1, 1)) * width;
+          const y = height / 2 - Math.max(-1, Math.min(1, level)) * (height / 2);
+          if (index === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        });
+        ctx.stroke();
+        return;
+      }
+      if (!analyser) {
+        ctx.moveTo(0, height / 2);
+        ctx.lineTo(width, height / 2);
+        ctx.stroke();
+        return;
+      }
+      const samples = new Uint8Array(analyser.fftSize);
+      analyser.getByteTimeDomainData(samples);
+      for (let index = 0; index < samples.length; index += 1) {
+        const x = (index / (samples.length - 1)) * width;
+        const y = (samples[index] / 255) * height;
+        if (index === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.stroke();
+    }
+
+    function watchWave() {
+      cancelAnimationFrame(waveTimer);
+      const frame = () => {
+        drawWave();
+        waveTimer = requestAnimationFrame(frame);
+      };
+      frame();
+    }
+
+    function restWave() {
+      cancelAnimationFrame(waveTimer);
+      analyser = null;
+      drawWave();
+    }
+
+    let gpuReading;
+    function metric(label, value) {
+      return UI.el("span", { class: "metric" }, `${label} `, UI.el("strong", {}, value));
+    }
+
     function showMetrics(source) {
       const lag = source && source.lag_ms;
       const listeners = source && source.listeners;
       const stt = source && source.stt_ms;
       const translate = source && source.translate_ms;
-      const gpu = source && source.gpu;
-      const parts = [`Listeners ${listeners || 0}`];
-      if (lag != null) parts.push(`lag ${Math.round(lag)} ms`);
-      if (stt != null) parts.push(`speech ${Math.round(stt)} ms`);
-      if (translate != null) parts.push(`translate ${Math.round(translate)} ms`);
-      if (gpu) parts.push(`GPU ${Math.round(gpu.utilization_percent)}%`);
-      else if (source && Object.prototype.hasOwnProperty.call(source, "gpu")) parts.push("GPU unavailable");
-      metrics.textContent = parts.join(" · ");
+      if (source && Object.prototype.hasOwnProperty.call(source, "gpu")) gpuReading = source.gpu;
+      const parts = [metric("Listeners", String(listeners || 0))];
+      if (lag != null) parts.push(metric("Delay", `${(lag / 1000).toFixed(1)} s`));
+      if (stt != null) parts.push(metric("Speech", `${Math.round(stt)} ms`));
+      if (translate != null) parts.push(metric("Translate", `${Math.round(translate)} ms`));
+      if (gpuReading) parts.push(metric("GPU", `${Math.round(gpuReading.utilization_percent)}%`));
+      metrics.replaceChildren(...parts);
     }
 
     function glossaryRow(english, indonesian, aliases) {
@@ -142,14 +464,20 @@
       row.className = "glossary-row";
       row.dataset.aliases = JSON.stringify(aliases || []);
       const en = document.createElement("input");
-      en.placeholder = "English";
+      en.type = "text";
+      en.placeholder = "worship service";
+      en.setAttribute("aria-label", "English");
       en.value = english || "";
       const id = document.createElement("input");
-      id.placeholder = "Bahasa Indonesia";
+      id.type = "text";
+      id.placeholder = "ibadah";
+      id.setAttribute("aria-label", "Bahasa Indonesia");
       id.value = indonesian || "";
       const remove = document.createElement("button");
       remove.type = "button";
-      remove.textContent = "Remove";
+      remove.className = "btn btn-ghost";
+      remove.textContent = "✕";
+      remove.setAttribute("aria-label", "Remove term");
       remove.addEventListener("click", () => row.remove());
       row.append(en, id, remove);
       return row;
@@ -168,10 +496,16 @@
     function paint(next, mode) {
       snapshot = next;
       remember(next);
-      banner.textContent = next.banner || next.status || "";
+      if (next.service_name) document.querySelector("#service-title").textContent = next.service_name;
+      setStatus(next.status);
+      setBanner(next.status, next.banner);
       showMetrics(next.metrics);
-      document.querySelector("#language").value = next.speaker_language || "en";
+      setLanguage(next.speaker_language || "en");
+      document.querySelector("#voice").checked = Boolean(next.voice);
       fillGlossary(next.glossary);
+      fillOutput(next);
+      setSourceLocked(next.status);
+      setRunning(next.status === "live" && (inputMode === "rtmp" || Boolean(stream)));
       const rendered = withOperatorText(next);
       if (mode === "resume") {
         originalView.applyResume(rendered.lines, rendered.provisional);
@@ -183,12 +517,11 @@
     }
 
     function withOperatorText(next) {
-      const copy = {
+      return {
         ...next,
         lines: (next.lines || []).map(operatorLine),
         provisional: next.provisional ? operatorLine(next.provisional) : null
       };
-      return copy;
     }
 
     function operatorLine(line) {
@@ -199,30 +532,54 @@
       };
     }
 
+    function shutDown(message) {
+      stopped = true;
+      error.textContent = message;
+      startButton.disabled = true;
+      stopButton.disabled = true;
+    }
+
     async function load() {
       const response = await fetch(`/api/sessions/${sessionId}`, { headers });
       if (!response.ok) {
-        error.textContent = "This operator link is not valid.";
+        shutDown(response.status === 404 ? "This service no longer exists." : "This console link is not valid. Sign in or ask for a new link.");
         return;
       }
       paint(await response.json());
     }
 
     function connect() {
-      const query = new URLSearchParams({ k: token });
+      if (stopped) return;
+      const query = new URLSearchParams();
+      if (token) query.set("k", token);
       if (lastLineId) query.set("after", lastLineId);
       if (lastSeq) query.set("since", String(lastSeq));
       socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/operate/${sessionId}?${query}`);
-      socket.onopen = () => { if (error.textContent === "Reconnecting…") error.textContent = ""; };
+      socket.onopen = () => { if (error.textContent.startsWith("Connection lost")) error.textContent = ""; };
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data);
         remember(event);
-        if (event.type === "deleted") { stopped = true; socket.close(); return; }
-        if (event.status === "ended") stopped = true;
+        if (event.type === "deleted" || event.type === "unauthorized") {
+          shutDown(event.type === "deleted" ? "This service was deleted." : "This console link is not valid. Sign in or ask for a new link.");
+          document.querySelector("#original").replaceChildren();
+          document.querySelector("#translation").replaceChildren();
+          socket.close();
+          return;
+        }
         if (event.type === "snapshot") { paint(event); return; }
         if (event.type === "resume") { paint(event, "resume"); return; }
         if (event.metrics) showMetrics(event.metrics);
-        banner.textContent = event.banner || event.status || "";
+        if (event.status) {
+          snapshot = { ...snapshot, status: event.status, banner: event.banner || "" };
+          setStatus(event.status);
+          setSourceLocked(event.status);
+          setRunning(event.status === "live" && (inputMode === "rtmp" || Boolean(stream)));
+        }
+        if (event.speaker_language && event.speaker_language !== document.querySelector("#language").value) {
+          setLanguage(event.speaker_language);
+        }
+        if ("voice" in event) document.querySelector("#voice").checked = Boolean(event.voice);
+        setBanner(event.status, event.banner);
         const line = event.line ? operatorLine(event.line) : null;
         const provisional = event.provisional ? operatorLine(event.provisional) : null;
         originalView.applyEvent({ ...event, line, provisional });
@@ -230,7 +587,7 @@
       };
       socket.onclose = () => {
         if (stopped || reconnectTimer) return;
-        error.textContent = "Reconnecting…";
+        error.textContent = "Connection lost. Reconnecting…";
         reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 1000);
       };
     }
@@ -243,71 +600,251 @@
       await audioContext.audioWorklet.addModule("/static/worklet.js");
       const source = audioContext.createMediaStreamSource(stream);
       const node = new AudioWorkletNode(audioContext, "pcm-capture");
+      const mute = audioContext.createGain();
+      mute.gain.value = 0;
+      analyser = audioContext.createAnalyser();
+      analyser.fftSize = 1024;
       node.port.onmessage = (event) => {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(event.data);
       };
       source.connect(node);
+      source.connect(analyser);
+      node.connect(mute);
+      mute.connect(audioContext.destination);
+      captureNode = node;
       if (audioContext.state !== "running") await audioContext.resume();
+      setRunning(true);
+      watchWave();
     }
 
-    document.querySelector("#start").addEventListener("click", async () => {
+    startButton.addEventListener("click", async () => {
+      if (starting || stream) return;
+      if (inputMode === "rtmp" && snapshot.status === "live") return;
+      starting = true;
       error.textContent = "";
-      const response = await fetch(`/api/sessions/${sessionId}/start`, { method: "POST", headers });
-      const body = await response.json();
-      if (!response.ok) {
-        error.textContent = body.detail || "Could not start.";
-        return;
-      }
+      UI.busy(startButton, true, "Starting");
       try {
-        await startMic();
-      } catch (err) {
-        error.textContent = "Microphone permission was denied.";
-        if (socket && socket.readyState === WebSocket.OPEN) {
-          socket.send(JSON.stringify({ type: "capture", state: "denied" }));
+        const response = await fetch(`/api/sessions/${sessionId}/start`, { method: "POST", headers });
+        const body = await response.json();
+        if (!response.ok) {
+          if (response.status === 404) stopped = true;
+          UI.busy(startButton, false);
+          UI.toast(body.detail || "Could not start.", "error");
+          return;
         }
+        UI.busy(startButton, false);
+        if (inputMode === "rtmp") {
+          setRunning(true);
+          setSourceLocked("live");
+          if (snapshot.rtmp && snapshot.rtmp.available === false) {
+            UI.toast("OBS ingest is not set up on this server.", "error");
+          }
+          return;
+        }
+        try {
+          await startMic();
+        } catch (err) {
+          setRunning(false);
+          UI.toast("The browser blocked the microphone. Allow microphone access and press Start again.", "error");
+          if (socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: "capture", state: "denied" }));
+          }
+        }
+      } finally {
+        starting = false;
+        startButton.removeAttribute("aria-busy");
+        startButton.disabled = stopped;
       }
     });
-    document.querySelector("#stop").addEventListener("click", async () => {
-      stopped = true;
+
+    stopButton.addEventListener("click", async () => {
+      if (!stopButton.classList.contains("live") && snapshot.status !== "live" && snapshot.status !== "paused") return;
       await fetch(`/api/sessions/${sessionId}/stop`, { method: "POST", headers });
       if (stream) stream.getTracks().forEach((track) => track.stop());
+      stream = null;
+      captureNode = null;
+      setRunning(false);
+      restWave();
+      if (audioContext) {
+        await audioContext.close();
+        audioContext = null;
+      }
     });
+
+    document.querySelector("#delete").addEventListener("click", async () => {
+      const ok = await UI.confirmAction({
+        title: "Delete this service?",
+        message: "The transcript is removed from the server and listeners lose their captions. This cannot be undone.",
+        confirm: "Delete service",
+        danger: true
+      });
+      if (!ok) return;
+      const response = await fetch(`/api/sessions/${sessionId}`, { method: "DELETE", headers });
+      if (!response.ok) {
+        const body = await response.json();
+        UI.toast(body.detail || "Could not delete the service.", "error");
+        return;
+      }
+      if (stream) stream.getTracks().forEach((track) => track.stop());
+      if (!token) {
+        location.href = "/";
+        return;
+      }
+      shutDown("This service was deleted.");
+      document.querySelector("#original").replaceChildren();
+      document.querySelector("#translation").replaceChildren();
+    });
+
+    document.querySelector("#source").addEventListener("change", async (event) => {
+      const next = event.target.value;
+      const response = await fetch(`/api/sessions/${sessionId}/input`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ input: next })
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        event.target.value = inputMode;
+        UI.toast(body.detail || "Could not change the audio source.", "error");
+        return;
+      }
+      inputMode = next;
+      showSource();
+    });
+
+    async function saveStage() {
+      const response = await fetch(`/api/sessions/${sessionId}/propresenter`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(propresenterBody())
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || "Could not save ProPresenter.");
+    }
+
+    document.querySelector("#pp-save").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      UI.busy(button, true, "Saving");
+      try {
+        await saveStage();
+        UI.toast("ProPresenter saved", "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(button, false);
+      }
+    });
+
+    document.querySelector("#pp-test").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
+      UI.busy(button, true, "Sending");
+      try {
+        await saveStage();
+        const response = await fetch(`/api/sessions/${sessionId}/propresenter/test`, { method: "POST", headers });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || "ProPresenter did not answer.");
+        UI.toast("ProPresenter received the test message", "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(button, false);
+      }
+    });
+
     document.querySelector("#language").addEventListener("change", async (event) => {
-      await fetch(`/api/sessions/${sessionId}/language`, {
+      const next = event.target.value;
+      const response = await fetch(`/api/sessions/${sessionId}/language`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ speaker_language: event.target.value })
+        body: JSON.stringify({ speaker_language: next })
       });
+      if (!response.ok) {
+        UI.toast("Could not change the language.", "error");
+        return;
+      }
+      setLanguage(next);
+      UI.toast(`Now translating ${UI.languagePair(next)}`, "success");
+    });
+
+    document.querySelector("#voice").addEventListener("change", async (event) => {
+      const enabled = event.target.checked;
+      const response = await fetch(`/api/sessions/${sessionId}/voice`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ tts_enabled: enabled })
+      });
+      if (!response.ok) {
+        event.target.checked = !enabled;
+        UI.toast("Could not change spoken translation.", "error");
+        return;
+      }
+      UI.toast(enabled ? "Spoken translation is on" : "Spoken translation is off", "success");
     });
 
     const listenerUrl = `${location.origin}/l/${sessionId}`;
+    const overlayUrl = `${location.origin}/v/${sessionId}`;
+    const secret = token ? `?k=${encodeURIComponent(token)}` : "";
     document.querySelector("#listener-link").href = listenerUrl;
-    document.querySelector("#overlay-link").href = `${location.origin}/v/${sessionId}`;
-    document.querySelector("#download-txt").href = `/api/sessions/${sessionId}/export.txt?k=${encodeURIComponent(token)}`;
-    document.querySelector("#download-srt").href = `/api/sessions/${sessionId}/export.srt?k=${encodeURIComponent(token)}`;
-    document.querySelector("#qr").src = `/api/sessions/${sessionId}/qr.svg?k=${encodeURIComponent(token)}`;
+    document.querySelector("#listener-url").value = listenerUrl;
+    document.querySelector("#overlay-link").href = overlayUrl;
+    document.querySelector("#overlay-url").value = overlayUrl;
+    document.querySelector("#download-txt").href = `/api/sessions/${sessionId}/export.txt${secret}`;
+    document.querySelector("#download-srt").href = `/api/sessions/${sessionId}/export.srt${secret}`;
+    document.querySelector("#qr").src = `/api/sessions/${sessionId}/qr.svg${secret}`;
+    if (pulpitSecret) {
+      document.querySelector("#pulpit-section").hidden = false;
+      document.querySelector("#pulpit-url").value = `${location.origin}/o/${sessionId}?k=${encodeURIComponent(pulpitSecret)}`;
+    }
+
     document.querySelector("#glossary-add").addEventListener("click", () => {
-      document.querySelector("#glossary-rows").append(glossaryRow("", ""));
+      const row = glossaryRow("", "");
+      document.querySelector("#glossary-rows").append(row);
+      row.querySelector("input").focus();
     });
-    document.querySelector("#glossary-save").addEventListener("click", async () => {
+
+    document.querySelector("#glossary-save").addEventListener("click", async (event) => {
+      const button = event.currentTarget;
       const terms = [...document.querySelectorAll("#glossary-rows .glossary-row")].map((row) => {
         const [en, id] = row.querySelectorAll("input");
         return { en: en.value.trim(), id: id.value.trim(), id_aliases: JSON.parse(row.dataset.aliases || "[]") };
       }).filter((term) => term.en || term.id);
-      const doNotTranslate = document.querySelector("#glossary-dnt").value.split("\n").map((line) => line.trim()).filter(Boolean);
-      const response = await fetch(`/api/sessions/${sessionId}/glossary`, {
-        method: "PUT",
-        headers,
-        body: JSON.stringify({ terms, do_not_translate: doNotTranslate })
-      });
-      const body = await response.json();
-      error.textContent = response.ok ? "" : (body.detail || "Could not save the glossary.");
+      const doNotTranslate = UI.lines(document.querySelector("#glossary-dnt").value);
+      UI.busy(button, true, "Saving");
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/glossary`, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({ terms, do_not_translate: doNotTranslate })
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || "Could not save the glossary.");
+        UI.toast("Glossary saved. It applies from the next sentence.", "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(button, false);
+      }
     });
+
+    restWave();
+    watchWave();
     setInterval(async () => {
-      const response = await fetch(`/api/sessions/${sessionId}/metrics`, { headers });
-      if (response.ok) showMetrics(await response.json());
-    }, 5000);
-    load().then(connect);
+      if (stopped || inputMode !== "rtmp") return;
+      const response = await fetch(`/api/sessions/${sessionId}/level`, { headers });
+      if (!response.ok) return;
+      const body = await response.json();
+      rtmpLevels.push(Number(body.level) || 0);
+      if (rtmpLevels.length > 80) rtmpLevels.shift();
+    }, 100);
+    load().then(() => {
+      if (stopped) return;
+      connect();
+      setInterval(async () => {
+        if (stopped) return;
+        const response = await fetch(`/api/sessions/${sessionId}/metrics`, { headers });
+        if (response.ok) showMetrics(await response.json());
+      }, 5000);
+    });
   </script>
 </body>
 </html>

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Overlay</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
@@ -13,7 +13,9 @@
   <script>
     const sessionId = location.pathname.split("/").pop();
     const params = new URLSearchParams(location.search);
-    const view = CaptionView(document.querySelector("#captions"), { controls: false });
+    const view = CaptionView(document.querySelector("#captions"), {
+      fieldOf: () => (params.get("lang") === "original" ? "original" : "translation")
+    });
     const banner = document.querySelector("#banner");
     let lastLineId = "";
     let lastSeq = 0;
@@ -30,7 +32,16 @@
       if (event.line && event.line.state === "final") lastLineId = event.line.id;
     }
 
-    function connect() {
+    async function connect() {
+      if (stopped) return;
+      if (!lastSeq) {
+        const response = await fetch(`/api/sessions/${sessionId}/captions`);
+        if (!response.ok) {
+          stopped = true;
+          banner.textContent = "This session was not found.";
+          return;
+        }
+      }
       const query = new URLSearchParams();
       if (lastLineId) query.set("after", lastLineId);
       if (lastSeq) query.set("since", String(lastSeq));
@@ -39,9 +50,14 @@
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data);
         remember(event);
-        if (event.type === "deleted") { stopped = true; socket.close(); return; }
-        if (event.status === "ended") stopped = true;
-        banner.textContent = event.banner || "";
+        if (event.type === "deleted") {
+          stopped = true;
+          banner.textContent = "This session was deleted.";
+          document.querySelector("#captions").replaceChildren();
+          socket.close();
+          return;
+        }
+        banner.textContent = event.status === "ended" ? "This session has ended." : (event.banner || "");
         if (event.type === "snapshot") { view.applySnapshot(event); return; }
         if (event.type === "resume") { view.applyResume(event.lines, event.provisional); return; }
         view.applyEvent(event);

@@ -1,8 +1,8 @@
 """One live caption pipeline.
 
-Finalised lines are append-only. A later hypothesis can replace the grey
-provisional line, and it can finalise that same line, but it does not rewrite
-an earlier final line.
+A later hypothesis can replace the grey provisional line, and it can finalise
+that same line. A scrap that continues the latest line is folded into that line.
+An earlier line stays as it was.
 """
 
 from __future__ import annotations
@@ -12,16 +12,17 @@ import contextlib
 import copy
 from dataclasses import dataclass
 import logging
+import re
 import time
 
 import numpy as np
 
-from app.agreement import LocalAgreement, ends_sentence
-from app.audio import SAMPLE_RATE, is_voiced, pcm16_to_float, rms
-from app.captions import CaptionLine, Transcript
+from app.agreement import LocalAgreement
+from app.audio import SAMPLE_RATE, float_to_pcm16, is_voiced, pcm16_to_float, rms
+from app.captions import CaptionLine, Transcript, Word
 from app.glossary import Glossary
 from app.scripture import is_long_reading, looks_like_commentary, primary_citation, reading_status
-from app.translator import TranslationRequest
+from app.translator import TranslationRequest, interpreter_background, target_language
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,8 @@ logger = logging.getLogger(__name__)
 class PipelineConfig:
     sample_rate: int = SAMPLE_RATE
     energy_threshold: float = 0.015
-    hangover_seconds: float = 0.4
+    hangover_seconds: float = 0.9
+    join_gap_seconds: float = 1.6
     decode_interval_seconds: float = 0.6
     max_hold_seconds: float = 8.0
     keep_tail_seconds: float = 1.0
@@ -39,18 +41,28 @@ class PipelineConfig:
     reading_gap_seconds: float = 2.5
     provisional_debounce_seconds: float = 0.45
     translate_timeout_seconds: float = 3.5
+    tts_timeout_seconds: float = 8.0
     min_decode_seconds: float = 0.2
     capture_stall_seconds: float = 2.0
+    lag_ceiling_ms: float = 5000.0
 
 
 class SessionPipeline:
-    def __init__(self, document: dict, repository, recognizer, translator, glossary: Glossary, config: PipelineConfig | None = None):
+    def __init__(self, document: dict, repository, recognizer, translator, glossary: Glossary, config: PipelineConfig | None = None, speaker=None):
         self.doc = document
         self.repo = repository
         self.recognizer = recognizer
         self.translator = translator
+        self.speaker = speaker
+        self.voice_enabled = bool(document.get("voice"))
+        self.durable = None
         self.glossary = glossary
         self.config = config or PipelineConfig()
+        self.clips: dict[str, bytes] = {}
+        self._billed_pcm = b""
+        self._cached_words: list[Word] = []
+        self._pending_pcm = b""
+        self._pending_words: list[Word] = []
         self.speaker_language = document["speaker_language"]
         self.buffer = np.zeros(0, dtype=np.float32)
         self.buffer_origin = 0.0
@@ -73,10 +85,14 @@ class SessionPipeline:
         self.reading_citation = None
         self._stopped = False
         self.watch_task: asyncio.Task | None = None
+        self.failure_hold = False
+        self.rtmp_seen = False
+        self.input_level = 0.0
 
     async def start(self) -> None:
         self.started = True
         self._stopped = False
+        self.failure_hold = False
         self.last_audio_at = time.monotonic()
         await self._set_status("live", self._standing_banner())
         if self.watch_task is None or self.watch_task.done():
@@ -135,8 +151,11 @@ class SessionPipeline:
         await self._emit("line", found)
         return True
 
+    def note_level(self, level: float) -> None:
+        self.input_level = level
+
     async def accept_pcm(self, pcm: bytes) -> None:
-        if not self.started or self.doc.get("status") == "ended":
+        if not self.started or self.failure_hold or self.doc.get("status") == "ended":
             return
         if len(pcm) > 256 * 1024:
             return
@@ -225,9 +244,10 @@ class SessionPipeline:
                     self.dirty = False
                 started = time.monotonic()
                 try:
-                    transcript = await asyncio.to_thread(self.recognizer.transcribe, audio, language, hotwords)
+                    transcript = await self._recognize(audio, language, hotwords)
                 except Exception:
                     logger.exception("speech recognition failed for session %s", self.doc["id"])
+                    await self._recognition_failed()
                     break
                 stt_ms = (time.monotonic() - started) * 1000
                 commit = None
@@ -267,6 +287,7 @@ class SessionPipeline:
         return None
 
     def _cut_index(self, words, confirmed: int, duration: float, force_cut: bool, origin: float) -> int:
+        del confirmed
         if force_cut or duration >= self.config.max_hold_seconds:
             cut = 0
             for index, word in enumerate(words):
@@ -275,8 +296,6 @@ class SessionPipeline:
             if cut == 0 and len(words) > 1:
                 cut = len(words) - 1
             return cut
-        if confirmed >= self.config.min_sentence_words and confirmed < len(words) and ends_sentence(words[confirmed - 1].text):
-            return confirmed
         return 0
 
     def _trim_to(self, absolute_end: float) -> None:
@@ -286,7 +305,7 @@ class SessionPipeline:
         self.buffer_origin += cut / self.config.sample_rate
 
     def _write_provisional(self, words, stt_ms: float) -> None:
-        text = _text(words)
+        text = self.glossary.preferred_casing(_text(words))
         current = self.doc.get("provisional")
         if current and current.get("state") == "provisional" and not current.get("hidden"):
             line_id = current["id"]
@@ -309,7 +328,7 @@ class SessionPipeline:
         self.doc.setdefault("metrics", {})["stt_ms"] = round(stt_ms, 1)
 
     def _begin_final(self, words, stt_ms: float) -> CaptionLine:
-        text = _text(words)
+        text = self.glossary.preferred_casing(_text(words))
         current = self.doc.get("provisional")
         if current and not current.get("hidden"):
             line_id = current["id"]
@@ -331,6 +350,25 @@ class SessionPipeline:
         self.provisional_gen += 1
         return line
 
+    def _attach_or_begin(self, words, stt_ms: float) -> CaptionLine:
+        fresh = self._begin_final(words, stt_ms)
+        previous = self._latest_final()
+        if previous is None or previous.get("hidden") or previous.get("suppressed"):
+            return fresh
+        gap = fresh.t0 - float(previous.get("t1") or 0)
+        if not _should_attach(previous.get("original") or "", fresh.original, gap, self.config.join_gap_seconds):
+            return fresh
+        fresh.id = previous["id"]
+        fresh.t0 = float(previous.get("t0") or fresh.t0)
+        fresh.original = self.glossary.preferred_casing(_join_caption(previous.get("original") or "", fresh.original))
+        return fresh
+
+    def _latest_final(self) -> dict | None:
+        for line in reversed(self.doc.get("lines") or []):
+            if line.get("state") == "final":
+                return line
+        return None
+
     async def _finalize_detached(self, action: dict, reason: str) -> None:
         del reason
         audio = action["audio"]
@@ -342,10 +380,11 @@ class SessionPipeline:
         hotwords = self.glossary.hotwords(language)
         started = time.monotonic()
         try:
-            transcript = await asyncio.to_thread(self.recognizer.transcribe, audio, language, hotwords)
+            transcript = await self._recognize(audio, language, hotwords, whole=True)
         except Exception:
             logger.exception("speech recognition failed for session %s", self.doc["id"])
-            transcript = Transcript([])
+            await self._recognition_failed()
+            return
         stt_ms = (time.monotonic() - started) * 1000
         words = _absolute(transcript.words, origin)
         if not words:
@@ -355,7 +394,7 @@ class SessionPipeline:
         async with self.lock:
             if self.doc.get("banner") == "Worship":
                 self.doc["banner"] = ""
-            line = self._begin_final(words, stt_ms)
+            line = self._attach_or_begin(words, stt_ms)
         await self._finish_final(line, endpoint_at=endpoint_at, stt_ms=stt_ms)
 
     async def _finish_final(self, line: CaptionLine, endpoint_at: float, stt_ms: float) -> None:
@@ -365,6 +404,7 @@ class SessionPipeline:
             source_language=self.speaker_language,
             glossary=self.glossary,
             context=context,
+            session_context=interpreter_background(self.doc),
         )
         started = time.monotonic()
         banner = None
@@ -373,7 +413,7 @@ class SessionPipeline:
                 self.translator.translate(request),
                 timeout=self.config.translate_timeout_seconds,
             )
-            line.translation = translation
+            line.translation = polish_translation(translation, _keep_words(self.glossary))
             line.glossary_miss = missing
             line.translate_ms = round((time.monotonic() - started) * 1000, 1)
         except Exception:
@@ -385,10 +425,14 @@ class SessionPipeline:
         line.stt_ms = round(stt_ms, 1)
         async with self.lock:
             self._apply_audience(line, stick=True)
+            spoken = "" if line.hidden else (line.listener_translation or "").strip()
+        audio_ready = await self._store_clip(line.id, spoken)
+        async with self.lock:
             if line.t1 > self.last_final_t1:
                 self.last_final_t1 = line.t1
             existing = [item for item in self.doc["lines"] if item["id"] == line.id]
             payload = line.as_dict()
+            payload["audio"] = audio_ready
             if existing:
                 existing[0].update(payload)
             else:
@@ -399,10 +443,74 @@ class SessionPipeline:
             metrics["lag_ms"] = line.latency_ms
             if banner:
                 self.doc["banner"] = banner
-            elif self.doc.get("banner") == "Translation failed for the last line":
-                self.doc["banner"] = ""
+            elif (line.latency_ms or 0) > self.config.lag_ceiling_ms:
+                self.doc["banner"] = "Captions are running behind."
+            elif self.doc.get("banner") in {"Translation failed for the last line", "Captions are running behind."}:
+                self.doc["banner"] = self._standing_banner()
             stored = payload
         await self._emit("line", stored)
+
+    async def _recognize(self, audio: np.ndarray, language: str, hotwords: str | None, whole: bool = False) -> Transcript:
+        if whole:
+            self._billed_pcm = b""
+            self._cached_words = []
+            return await asyncio.to_thread(self.recognizer.transcribe, audio, language, hotwords)
+        piece, offset, cached = self._unbilled(audio)
+        if piece is None:
+            return Transcript(cached)
+        try:
+            transcript = await asyncio.to_thread(self.recognizer.transcribe, piece, language, hotwords)
+        except Exception:
+            self._billed_pcm = self._pending_pcm
+            self._cached_words = self._pending_words
+            raise
+        if cached is None:
+            return transcript
+        shifted = [Word(word.text, word.start + offset, word.end + offset) for word in transcript.words]
+        self._cached_words = list(cached) + shifted
+        return Transcript(self._cached_words)
+
+    def _unbilled(self, audio: np.ndarray) -> tuple[np.ndarray | None, float, list[Word] | None]:
+        if not getattr(self.recognizer, "billed_once", False):
+            return audio, 0.0, None
+        pcm = float_to_pcm16(audio)
+        if self._billed_pcm and pcm.startswith(self._billed_pcm):
+            offset = (len(self._billed_pcm) // 2) / SAMPLE_RATE
+            fresh = pcm[len(self._billed_pcm) :]
+            cached = list(self._cached_words)
+            if len(fresh) < int(SAMPLE_RATE * 0.15):
+                return None, offset, cached
+            self._pending_pcm = self._billed_pcm
+            self._pending_words = cached
+            self._billed_pcm = pcm
+            return pcm16_to_float(fresh), offset, cached
+        self._pending_pcm = self._billed_pcm
+        self._pending_words = list(self._cached_words)
+        self._billed_pcm = pcm
+        self._cached_words = []
+        return audio, 0.0, []
+
+    async def set_voice(self, enabled: bool) -> None:
+        async with self.lock:
+            self.voice_enabled = bool(enabled)
+            self.doc["voice"] = self.voice_enabled
+        await self._emit("status")
+
+    async def _store_clip(self, line_id: str, text: str) -> bool:
+        if not self.voice_enabled or not self.speaker or not text:
+            return False
+        try:
+            clip = await asyncio.wait_for(
+                self.speaker.synthesize(text, target_language(self.speaker_language)),
+                timeout=self.config.tts_timeout_seconds,
+            )
+        except Exception:
+            logger.info("speech synthesis failed for session %s line %s", self.doc["id"], line_id)
+            return False
+        if not clip:
+            return False
+        self.clips[line_id] = clip
+        return True
 
     def _schedule_provisional_translation(self) -> None:
         provisional = self.doc.get("provisional")
@@ -419,7 +527,13 @@ class SessionPipeline:
         await asyncio.sleep(self.config.provisional_debounce_seconds)
         if generation != self.provisional_gen or not text.strip():
             return
-        request = TranslationRequest(text=text, source_language=language, glossary=self.glossary, context=context)
+        request = TranslationRequest(
+            text=text,
+            source_language=language,
+            glossary=self.glossary,
+            context=context,
+            session_context=interpreter_background(self.doc),
+        )
         try:
             translation, missing = await asyncio.wait_for(
                 self.translator.translate(request),
@@ -439,6 +553,19 @@ class SessionPipeline:
             if not provisional.get("suppressed"):
                 provisional["listener_translation"] = translation
         await self._emit("state")
+
+    async def _recognition_failed(self) -> None:
+        self.failure_hold = True
+        self.started = False
+        self._stopped = True
+        if self.watch_task and not self.watch_task.done():
+            self.watch_task.cancel()
+        async with self.lock:
+            self.buffer = np.zeros(0, dtype=np.float32)
+            self.speech_active = False
+            self.doc["provisional"] = None
+            self.provisional_gen += 1
+        await self._set_status("paused", "Speech recognition failed. Press Start to try again.")
 
     async def _maybe_worship(self, audio: np.ndarray) -> None:
         duration = len(audio) / self.config.sample_rate
@@ -461,7 +588,15 @@ class SessionPipeline:
                 continue
             stalled = time.monotonic() - self.last_audio_at > self.config.capture_stall_seconds
             if stalled and self.doc.get("status") == "live":
-                await self._set_status("paused", "No audio from the operator microphone")
+                if self.doc.get("input") == "rtmp":
+                    from app.rtmp import DROPPED, UNAVAILABLE, WAITING
+
+                    if (self.doc.get("banner") or "") == UNAVAILABLE:
+                        continue
+                    banner = DROPPED if self.rtmp_seen else WAITING
+                else:
+                    banner = "No audio from the operator microphone"
+                await self._set_status("paused", banner)
 
     def _standing_banner(self) -> str:
         if self.doc.get("development_translator"):
@@ -542,12 +677,21 @@ class SessionPipeline:
                 "status": snapshot.get("status"),
                 "banner": snapshot.get("banner") or "",
                 "speaker_language": self.speaker_language,
+                "voice": bool(snapshot.get("voice")),
                 "provisional": snapshot.get("provisional"),
                 "line": copy.deepcopy(line) if line else None,
                 "metrics": snapshot.get("metrics") or {},
             }
         await self.repo.save(snapshot["id"], snapshot)
         await self.repo.publish(snapshot["id"], event)
+        durable = event_type in {"line", "deleted"} or (
+            event_type == "status" and snapshot.get("status") in {"ended", "deleted"}
+        )
+        if self.durable and durable:
+            try:
+                await self.durable(snapshot)
+            except Exception:
+                logger.exception("could not save service %s", snapshot["id"])
 
     def _spawn(self, coroutine, track: bool = True) -> None:
         task = asyncio.create_task(coroutine)
@@ -556,8 +700,97 @@ class SessionPipeline:
             task.add_done_callback(self.tasks.discard)
 
 
+def _should_attach(previous: str, new: str, gap: float, limit: float) -> bool:
+    """A scrap after a breath belongs on the line already on screen."""
+    if gap < -0.05 or gap > limit:
+        return False
+    left = previous.strip()
+    right = new.strip()
+    if not left or not right:
+        return False
+    first = re.match(r"[A-Za-z']+", right)
+    first_word = first.group(0).casefold() if first else ""
+    if first_word in _CONTINUATIONS:
+        return True
+    if right[0].islower():
+        return True
+    if left.endswith((",", ";", ":")):
+        return True
+    words = re.findall(r"[A-Za-z0-9']+", right)
+    short = right.casefold().strip(" .!?,")
+    return len(words) <= 1 and short not in _COMPLETE_SHORT
+
+
+def _join_caption(previous: str, new: str) -> str:
+    left = previous.rstrip()
+    right = new.strip()
+    if not left:
+        return right
+    if not right:
+        return left
+    if not re.search(r"[.?!]$", left) and right[0].isupper():
+        right = right[0].lower() + right[1:]
+    return f"{left} {right}"
+
+
+_CONTINUATIONS = {
+    "and", "for", "with", "even", "are", "who", "that", "not", "but", "or",
+    "which", "when", "because", "so", "of", "from",
+}
+_COMPLETE_SHORT = {
+    "amen", "hallelujah", "thanks", "thank you", "please", "yes", "no",
+    "hello", "hi", "okay", "ok", "shalom",
+}
+
+
+def _keep_words(glossary: Glossary) -> set[str]:
+    words: set[str] = set()
+    for term in glossary.terms:
+        words.update(term.en.split())
+        words.update(term.id.split())
+    for phrase in glossary.do_not_translate:
+        words.update(phrase.split())
+    words.update({"Allah", "Anda", "Roh", "Kudus", "Yohanes", "Injil"})
+    return {word.strip(".,;:") for word in words if word.strip(".,;:")}
+
+
+def polish_translation(text: str, keep: set[str] | None = None) -> str:
+    """Capitalize the line, and do not capitalize a word only because a comma preceded it."""
+    cleaned = " ".join(text.split())
+    if not cleaned:
+        return cleaned
+    cleaned = cleaned[0].upper() + cleaned[1:]
+    kept = {word.casefold() for word in (keep or set())}
+
+    def fix(match: re.Match) -> str:
+        word = match.group(1)
+        if word.casefold() in kept:
+            return match.group(0)
+        return " " + word[0].lower() + word[1:]
+
+    return re.sub(r"(?<=[^\s.?!])\s+([A-Z][\w]+)", fix, cleaned)
+
+
 def _text(words) -> str:
-    return " ".join(word.text for word in words if word.text).strip()
+    raw = " ".join(word.text for word in words if word.text).strip()
+    return _join_false_periods(raw)
+
+
+def _join_false_periods(text: str) -> str:
+    """A short pause inside one breath should not become a new sentence."""
+    continuations = {
+        "comforts", "from", "is", "and", "let", "we", "are", "was", "were",
+        "opens", "open", "has", "have", "will", "can",
+    }
+
+    def join(match: re.Match) -> str:
+        word = match.group(1)
+        if word.casefold() not in continuations:
+            return match.group(0)
+        return " " + word[0].lower() + word[1:]
+
+    text = re.sub(r"\.\s+([A-Z][A-Za-z]+)", join, text)
+    return re.sub(r",\s+([A-Z][A-Za-z]+)", join, text)
 
 
 def _absolute(words, origin: float):

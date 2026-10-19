@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Set up your church · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth">
+  <div>
+    <main class="auth-card wide">
+      <a class="brand" href="/"><img src="/static/icon.svg" alt=""><span>voiceofgod</span></a>
+      <p class="eyebrow">Welcome</p>
+      <h1>Set up your church</h1>
+      <p class="lede">The interpreter uses this for every service. You can change it later in Settings.</p>
+      <p class="alert" id="error" role="alert"></p>
+      <form id="church" novalidate>
+        <div class="field">
+          <label for="name">Church name</label>
+          <input id="name" type="text" autocomplete="organization" maxlength="120" required placeholder="Grace Church Jakarta">
+        </div>
+        <div class="field">
+          <label for="names">Names to keep as spoken <span class="optional">· optional</span></label>
+          <textarea id="names" placeholder="Grace Church&#10;Pastor John&#10;Kids Kingdom"></textarea>
+          <p class="hint">One per line. These are never translated, and they help speech recognition hear them correctly.</p>
+        </div>
+        <div class="field">
+          <label for="note">About your church <span class="optional">· optional</span></label>
+          <textarea id="note" class="tall"></textarea>
+          <p class="hint">Background for the interpreter, such as the city and the pastors' names. Do not paste Bible verses or song lyrics.</p>
+        </div>
+        <button class="btn btn-primary btn-lg btn-block" id="submit" type="submit">Continue</button>
+      </form>
+    </main>
+    <p class="auth-foot">Signed in as <strong id="who">…</strong> · <a href="#" id="logout">Sign out</a></p>
+  </div>
+  <script src="/static/ui.js"></script>
+  <script>
+    const error = document.querySelector("#error");
+    const note = document.querySelector("#note");
+    const submit = document.querySelector("#submit");
+    let template = "";
+
+    UI.session({ church: false }).then((me) => {
+      if (me.church_id) {
+        location.replace("/");
+        return;
+      }
+      document.querySelector("#who").textContent = me.username;
+      template = me.church_template || "";
+      note.value = template;
+      document.querySelector("#name").focus();
+    }).catch((err) => { error.textContent = err.message; });
+
+    document.querySelector("#logout").addEventListener("click", async (event) => {
+      event.preventDefault();
+      await fetch("/api/logout", { method: "POST" });
+      location.href = "/login";
+    });
+
+    document.querySelector("#church").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      error.textContent = "";
+      const name = document.querySelector("#name").value.trim();
+      if (!name) {
+        error.textContent = "Enter the church name.";
+        document.querySelector("#name").focus();
+        return;
+      }
+      UI.busy(submit, true, "Saving");
+      try {
+        await UI.api("/api/onboarding", {
+          method: "POST",
+          body: { name, note: note.value.trim() === template.trim() ? "" : note.value, keep_names: UI.lines(document.querySelector("#names").value) },
+          fallback: "Could not save the church."
+        });
+        location.href = "/";
+      } catch (err) {
+        error.textContent = err.message;
+        UI.busy(submit, false);
+      }
+    });
+  </script>
+</body>
+</html>

@@ -4,6 +4,7 @@ __pycache__/
 .mypy_cache/
 *.pyc
 .env
+data/
 .models/
 eval/results/
 *.sermon.wav

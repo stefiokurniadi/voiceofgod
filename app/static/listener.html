@@ -2,32 +2,43 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex">
-  <title>Listen</title>
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Live captions</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="listener">
-  <header class="bar">
-    <div>
-      <strong id="title">Captions</strong>
-      <div class="banner" id="banner"></div>
+  <header class="listener-bar">
+    <div class="meta">
+      <p class="eyebrow" id="service">Live captions</p>
+      <h1><span id="title">Captions</span> <span class="badge badge-ready" id="status">Waiting</span></h1>
     </div>
-    <div class="controls">
-      <button type="button" id="show-en">English</button>
-      <button type="button" id="show-id">Bahasa Indonesia</button>
-      <button type="button" id="smaller" aria-label="Smaller text">A−</button>
-      <button type="button" id="larger" aria-label="Larger text">A+</button>
+    <div class="toolbar">
+      <div class="segmented" role="group" aria-label="Caption language">
+        <button type="button" id="show-en">English</button>
+        <button type="button" id="show-id">Indonesia</button>
+      </div>
+      <div class="size-control" role="group" aria-label="Text size">
+        <button type="button" id="smaller" aria-label="Smaller text">A−</button>
+        <button type="button" id="larger" aria-label="Larger text">A+</button>
+      </div>
+      <button type="button" class="btn" id="listen" aria-pressed="false" hidden>🎧 Listen</button>
     </div>
   </header>
+  <p class="listen-note" id="listen-note" hidden>Use headphones so the pulpit microphone does not pick up the audio.</p>
+  <p class="listener-banner" id="banner" aria-live="polite"></p>
   <main class="captions" id="captions" data-size="3"></main>
-  <button type="button" id="jump" hidden>Live</button>
+  <button type="button" id="jump" hidden>↓ Back to live</button>
   <script src="/static/captions.js"></script>
   <script>
     const sessionId = location.pathname.split("/").filter(Boolean).pop();
     const captions = document.querySelector("#captions");
     const banner = document.querySelector("#banner");
     const title = document.querySelector("#title");
+    const statusBadge = document.querySelector("#status");
+    const STATUS = { live: ["badge-live", "Live"], paused: ["badge-paused", "Paused"], ended: ["badge-ended", "Ended"], ready: ["badge-ready", "Waiting"] };
     let speaker = "en";
     let display = localStorage.getItem("voiceofgod-language") || "translated";
     let size = Number(localStorage.getItem("voiceofgod-size") || "3");
@@ -36,6 +47,11 @@
     let lastSeq = 0;
     let reconnectTimer = null;
     let stopped = false;
+    let listening = false;
+    let playing = false;
+    const queue = [];
+    const heard = new Set();
+    const player = new Audio();
     captions.dataset.size = String(size);
 
     function fieldOf() {
@@ -45,13 +61,35 @@
 
     const view = CaptionView(captions, { fieldOf, jumpButton: document.querySelector("#jump") });
 
+    function setStatus(status) {
+      const [className, label] = STATUS[status] || STATUS.ready;
+      statusBadge.className = `badge ${className}`;
+      statusBadge.textContent = label;
+    }
+
+    function setBanner(status, text) {
+      if (status === "ended") banner.textContent = "This service has ended. Thank you for joining.";
+      else if (status === "paused" && !text) banner.textContent = "Captions are paused. They will continue shortly.";
+      else banner.textContent = text || "";
+    }
+
+    function describe(next) {
+      const parts = [next.church_name, next.service_name].filter(Boolean);
+      if (parts.length) {
+        document.querySelector("#service").textContent = parts.join(" · ");
+        document.title = `${next.service_name || "Live captions"} · captions`;
+      }
+    }
+
     function markLanguages() {
       const englishIsOriginal = speaker === "en";
       document.querySelector("#show-en").classList.toggle("active", (display === "original") === englishIsOriginal);
-      document.querySelector("#show-id").classList.toggle("active", (display === "translation") === englishIsOriginal);
-      title.textContent = display === "original"
-        ? (speaker === "en" ? "English" : "Bahasa Indonesia")
-        : (speaker === "en" ? "Bahasa Indonesia" : "English");
+      document.querySelector("#show-id").classList.toggle("active", (display === "original") !== englishIsOriginal);
+      document.querySelector("#show-en").setAttribute("aria-pressed", document.querySelector("#show-en").classList.contains("active") ? "true" : "false");
+      document.querySelector("#show-id").setAttribute("aria-pressed", document.querySelector("#show-id").classList.contains("active") ? "true" : "false");
+      const english = (display === "original") === englishIsOriginal;
+      title.textContent = english ? "English" : "Bahasa Indonesia";
+      document.documentElement.lang = english ? "en" : "id";
     }
 
     function remember(event) {
@@ -75,11 +113,35 @@
       }
     }
 
+    function applyVoice(enabled) {
+      const on = enabled === true;
+      listenButton.hidden = !on;
+      if (!on) document.querySelector("#listen-note").hidden = true;
+      if (on || !listening) return;
+      setListening(false);
+    }
+
+    function setListening(on) {
+      listening = on;
+      listenButton.setAttribute("aria-pressed", on ? "true" : "false");
+      listenButton.textContent = on ? "■ Stop" : "🎧 Listen";
+      listenButton.classList.toggle("active", on);
+      document.querySelector("#listen-note").hidden = !on;
+      if (!on) {
+        player.pause();
+        queue.length = 0;
+        playing = false;
+      }
+    }
+
     function paint(next) {
       snapshot = next;
       speaker = next.speaker_language || speaker;
+      applyVoice(next.voice);
       remember(next);
-      banner.textContent = next.status === "ended" ? "This session has ended." : (next.banner || "");
+      describe(next);
+      setStatus(next.status);
+      setBanner(next.status, next.banner);
       markLanguages();
       view.applySnapshot(next);
     }
@@ -87,7 +149,8 @@
     async function load() {
       const response = await fetch(`/api/sessions/${sessionId}/captions`);
       if (!response.ok) {
-        banner.textContent = "This session was not found.";
+        banner.textContent = "This service was not found. Check the link or scan the QR code again.";
+        setStatus("ended");
         stopped = true;
         return;
       }
@@ -95,6 +158,7 @@
     }
 
     function connect() {
+      if (stopped) return;
       const query = new URLSearchParams();
       if (lastLineId) query.set("after", lastLineId);
       if (lastSeq) query.set("since", String(lastSeq));
@@ -102,15 +166,16 @@
       const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/listen/${sessionId}${suffix}`);
       socket.onmessage = (message) => {
         const event = JSON.parse(message.data);
+        if ("voice" in event) applyVoice(event.voice);
         remember(event);
         if (event.type === "deleted") {
           stopped = true;
-          banner.textContent = "This session was deleted.";
+          banner.textContent = "This service is no longer available.";
+          setStatus("ended");
           captions.replaceChildren();
           socket.close();
           return;
         }
-        if (event.status === "ended") stopped = true;
         if (event.type === "snapshot") {
           paint(event);
           return;
@@ -123,7 +188,8 @@
             snapshot.status = event.status || snapshot.status;
             snapshot.banner = event.banner || "";
           }
-          banner.textContent = event.status === "ended" ? "This session has ended." : (event.banner || "");
+          setStatus(event.status);
+          setBanner(event.status, event.banner);
           markLanguages();
           view.applyResume(event.lines, event.provisional);
           return;
@@ -132,11 +198,14 @@
         snapshot.status = event.status || snapshot.status;
         snapshot.banner = event.banner || "";
         snapshot.speaker_language = event.speaker_language || snapshot.speaker_language;
+        speaker = snapshot.speaker_language || speaker;
         if (event.line && event.line.state === "final") mergeLines([event.line]);
         snapshot.provisional = event.provisional || null;
-        banner.textContent = snapshot.status === "ended" ? "This session has ended." : (snapshot.banner || "");
+        setStatus(snapshot.status);
+        setBanner(snapshot.status, snapshot.banner);
         markLanguages();
         view.applyEvent(event);
+        if (event.line) enqueue(event.line);
       };
       socket.onclose = () => {
         if (stopped || reconnectTimer) return;
@@ -157,16 +226,53 @@
       markLanguages();
       if (snapshot) view.refresh(snapshot);
     });
-    document.querySelector("#smaller").addEventListener("click", () => {
-      size = Math.max(1, size - 1);
+    function resize(step) {
+      size = Math.min(5, Math.max(1, size + step));
       captions.dataset.size = String(size);
       localStorage.setItem("voiceofgod-size", String(size));
+      document.querySelector("#smaller").disabled = size === 1;
+      document.querySelector("#larger").disabled = size === 5;
+      view.follow();
+    }
+    document.querySelector("#smaller").addEventListener("click", () => resize(-1));
+    document.querySelector("#larger").addEventListener("click", () => resize(1));
+    resize(0);
+
+    const listenButton = document.querySelector("#listen");
+    listenButton.addEventListener("click", () => {
+      setListening(!listening);
+      if (listening) pump();
     });
-    document.querySelector("#larger").addEventListener("click", () => {
-      size = Math.min(5, size + 1);
-      captions.dataset.size = String(size);
-      localStorage.setItem("voiceofgod-size", String(size));
-    });
+
+    function enqueue(line) {
+      if (!listening || !line || line.state !== "final" || line.hidden || !line.audio) return;
+      if (heard.has(line.id) || queue.includes(line.id)) return;
+      heard.add(line.id);
+      queue.push(line.id);
+      pump();
+    }
+
+    async function pump() {
+      if (!listening || playing || queue.length === 0) return;
+      playing = true;
+      const id = queue.shift();
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}/audio/${encodeURIComponent(id)}`);
+        if (!response.ok) throw new Error("missing");
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        player.src = url;
+        await player.play();
+        await new Promise((resolve) => {
+          player.onended = () => { URL.revokeObjectURL(url); resolve(); };
+          player.onerror = () => { URL.revokeObjectURL(url); resolve(); };
+        });
+      } catch (error) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      playing = false;
+      if (listening) pump();
+    }
 
     load().then(connect);
   </script>

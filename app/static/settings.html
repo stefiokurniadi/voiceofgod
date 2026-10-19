@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Settings · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar"></header>
+  <main class="page narrow">
+    <div class="page-head">
+      <div>
+        <h1>Settings</h1>
+        <p>Your church profile and the defaults for new services.</p>
+      </div>
+    </div>
+
+    <form class="card" id="church-form" novalidate>
+      <div class="card-head">
+        <h2>Church profile</h2>
+        <p>Shared by everyone in your church and sent with every translation.</p>
+      </div>
+      <div class="card-body">
+        <div class="field">
+          <label for="name">Church name</label>
+          <input id="name" type="text" maxlength="120" required>
+        </div>
+        <div class="field">
+          <label for="names">Names to keep as spoken</label>
+          <textarea id="names" placeholder="Grace Church&#10;Pastor John"></textarea>
+          <p class="hint">One per line. These are never translated, and they help speech recognition hear them correctly.</p>
+        </div>
+        <div class="field">
+          <label for="note">About your church</label>
+          <textarea id="note" class="tall"></textarea>
+          <p class="hint">Background for the interpreter. Do not paste Bible verses or song lyrics.</p>
+        </div>
+      </div>
+      <div class="card-foot">
+        <button class="btn btn-primary" type="submit" id="church-save">Save profile</button>
+      </div>
+    </form>
+
+    <form class="card" id="defaults-form" novalidate>
+      <div class="card-head">
+        <h2>Service defaults</h2>
+        <p>New services start with these. You can change them for each service.</p>
+      </div>
+      <div class="card-body">
+        <div class="field">
+          <span class="label" id="language-label">The preacher usually speaks</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="language-label">
+            <label><input type="radio" name="language" value="en"><span>English</span></label>
+            <label><input type="radio" name="language" value="id"><span>Bahasa Indonesia</span></label>
+          </div>
+        </div>
+        <div class="field">
+          <label class="switch">
+            <input type="checkbox" id="tts" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <strong>Spoken translation</strong>
+              <small>Listeners can tap Listen to hear each finished line. They need headphones so the pulpit microphone does not pick it up.</small>
+            </span>
+          </label>
+        </div>
+      </div>
+      <div class="card-foot">
+        <button class="btn btn-primary" type="submit" id="defaults-save">Save defaults</button>
+      </div>
+    </form>
+  </main>
+  <script src="/static/ui.js"></script>
+  <script>
+    let me = null;
+
+    function fill(profile) {
+      me = profile;
+      document.querySelector("#name").value = profile.church_name || "";
+      document.querySelector("#names").value = (profile.keep_names || []).join("\n");
+      document.querySelector("#note").value = profile.church_note || "";
+      const speaker = profile.speaker_language || "en";
+      document.querySelector(`input[name=language][value="${speaker}"]`).checked = true;
+      document.querySelector("#tts").checked = Boolean(profile.tts_enabled);
+    }
+
+    async function save(button, body, message) {
+      UI.busy(button, true, "Saving");
+      try {
+        const saved = await UI.api("/api/settings", { method: "PUT", body, fallback: "Could not save." });
+        fill(saved);
+        UI.header(saved, "settings");
+        UI.toast(message, "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(button, false);
+      }
+    }
+
+    document.querySelector("#church-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = document.querySelector("#name").value.trim();
+      if (!name) {
+        UI.toast("Enter the church name.", "error");
+        document.querySelector("#name").focus();
+        return;
+      }
+      save(document.querySelector("#church-save"), {
+        name,
+        note: document.querySelector("#note").value,
+        keep_names: UI.lines(document.querySelector("#names").value)
+      }, "Church profile saved");
+    });
+
+    document.querySelector("#defaults-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      save(document.querySelector("#defaults-save"), {
+        speaker_language: document.querySelector("input[name=language]:checked").value,
+        tts_enabled: document.querySelector("#tts").checked
+      }, "Defaults saved");
+    });
+
+    UI.session().then((profile) => {
+      UI.header(profile, "settings");
+      fill(profile);
+    }).catch((err) => UI.toast(err.message, "error"));
+  </script>
+</body>
+</html>

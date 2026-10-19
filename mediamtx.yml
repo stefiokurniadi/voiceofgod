@@ -1,0 +1,18 @@
+# MediaMTX reads RTMP_AUTH_URL from the environment. Docker Compose sets it
+# to the API container. On a laptop, point it at this machine:
+#   RTMP_AUTH_URL=http://127.0.0.1:8080/internal/rtmp-auth/<RTMP_AUTH_SECRET>
+logLevel: warn
+rtmp: true
+rtmpAddress: :1935
+rtsp: false
+hls: false
+webrtc: false
+srt: false
+api: false
+metrics: false
+pprof: false
+authMethod: http
+authHTTPAddress: ${RTMP_AUTH_URL}
+paths:
+  all:
+    source: publisher

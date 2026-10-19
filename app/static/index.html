@@ -2,57 +2,189 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="robots" content="noindex">
-  <title>voiceofgod</title>
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Services · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <div class="shell">
-    <h1>voiceofgod</h1>
-    <p class="lede">Live sermon captions for the room. English and Bahasa Indonesia. Listeners open a link. They do not install an app or create an account.</p>
-    <form id="create">
-      <label for="language">Speaker language</label>
-      <select id="language" name="speaker_language">
-        <option value="en">English</option>
-        <option value="id">Bahasa Indonesia</option>
-      </select>
-      <label for="names">Names and phrases to leave untranslated</label>
-      <textarea id="names" placeholder="Grace Church&#10;One name or phrase on each line"></textarea>
-      <p class="error" id="error"></p>
-      <button class="primary" id="submit" type="submit">Create session</button>
+  <header class="topbar" id="topbar"></header>
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <p class="eyebrow" id="church">Services</p>
+        <h1>Services</h1>
+        <p>Each service has its own captions, listener QR code, and transcript.</p>
+      </div>
+      <button class="btn btn-primary btn-lg" type="button" id="new-service">New service</button>
+    </div>
+    <div class="services" id="list" aria-live="polite">
+      <div class="skeleton"></div>
+      <div class="skeleton"></div>
+    </div>
+  </main>
+
+  <dialog class="dialog" id="create-dialog">
+    <form id="create" method="dialog" novalidate>
+      <div class="dialog-head">
+        <h2>New service</h2>
+        <p>Open the console, press Start, and listeners scan the QR code.</p>
+      </div>
+      <div class="dialog-body">
+        <p class="alert" id="error" role="alert"></p>
+        <div class="field-row">
+          <div class="field">
+            <label for="name">Service name</label>
+            <input id="name" type="text" maxlength="120" required placeholder="Sunday morning">
+          </div>
+          <div class="field">
+            <label for="date">Date</label>
+            <input id="date" type="date">
+          </div>
+        </div>
+        <div class="field">
+          <span class="label" id="language-label">The preacher speaks</span>
+          <div class="segmented block" role="radiogroup" aria-labelledby="language-label">
+            <label><input type="radio" name="language" value="en" checked><span>English</span></label>
+            <label><input type="radio" name="language" value="id"><span>Bahasa Indonesia</span></label>
+          </div>
+          <p class="hint" id="language-hint">Listeners read Bahasa Indonesia.</p>
+        </div>
+        <div class="field">
+          <label class="switch">
+            <input type="checkbox" id="voice" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <strong>Spoken translation</strong>
+              <small>Listeners can tap Listen to hear each line through headphones.</small>
+            </span>
+          </label>
+        </div>
+        <div class="field">
+          <label for="note">About this service <span class="optional">· optional</span></label>
+          <textarea id="note"></textarea>
+          <p class="hint">Background for the interpreter. Do not paste Bible verses or song lyrics.</p>
+        </div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn" type="button" id="cancel">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="submit">Create and open</button>
+      </div>
     </form>
-  </div>
+  </dialog>
+
+  <script src="/static/ui.js"></script>
   <script>
-    const form = document.querySelector("#create");
+    const list = document.querySelector("#list");
+    const createDialog = document.querySelector("#create-dialog");
     const error = document.querySelector("#error");
     const submit = document.querySelector("#submit");
-    form.addEventListener("submit", async (event) => {
+    const note = document.querySelector("#note");
+    const SERVICE_NOTE = "Preacher:\nPassage:\nAnything else about this service:\n";
+    let profile = null;
+
+    function language() {
+      return document.querySelector("input[name=language]:checked").value;
+    }
+
+    function showLanguageHint() {
+      document.querySelector("#language-hint").textContent =
+        language() === "en" ? "Listeners read Bahasa Indonesia." : "Listeners read English.";
+    }
+
+    function row(service) {
+      const date = UI.parseDay(service.service_date) || UI.parseDay(service.created_at);
+      const meta = [UI.languagePair(service.speaker_language)];
+      if (service.service_date) meta.unshift(UI.formatDate(service.service_date));
+      else meta.unshift(`Created ${UI.formatDate(service.created_at)}`);
+      if (service.tts_enabled) meta.push("Spoken translation");
+      return UI.el("a", { class: "service", href: `/o/${service.id}` },
+        UI.el("div", { class: "service-date", "aria-hidden": "true" },
+          UI.el("small", {}, date ? date.toLocaleDateString(undefined, { month: "short" }) : ""),
+          UI.el("strong", {}, date ? String(date.getDate()) : "")
+        ),
+        UI.el("div", { class: "service-main" },
+          UI.el("h3", {}, service.name),
+          UI.el("div", { class: "service-meta" }, meta.map((item) => UI.el("span", {}, item)))
+        ),
+        UI.el("div", { class: "service-side" },
+          UI.statusBadge(service.status),
+          UI.el("span", { class: "chevron", "aria-hidden": "true" }, "›")
+        )
+      );
+    }
+
+    function empty() {
+      return UI.el("div", { class: "empty" },
+        UI.el("div", { class: "empty-icon", "aria-hidden": "true" }, "+"),
+        UI.el("h2", {}, "No services yet"),
+        UI.el("p", {}, "Create one for your next gathering. It takes less than a minute."),
+        UI.el("button", { class: "btn btn-primary", type: "button", onclick: openCreate }, "Create your first service")
+      );
+    }
+
+    async function load() {
+      profile = await UI.session();
+      UI.header(profile, "services");
+      document.querySelector("#church").textContent = profile.church_name || "Services";
+      const body = await UI.api("/api/services");
+      const services = body.services || [];
+      list.replaceChildren(...(services.length ? services.map(row) : [empty()]));
+    }
+
+    function openCreate() {
+      error.textContent = "";
+      document.querySelector("#name").value = "";
+      document.querySelector("#date").value = UI.today();
+      const speaker = (profile && profile.speaker_language) || "en";
+      document.querySelector(`input[name=language][value="${speaker}"]`).checked = true;
+      document.querySelector("#voice").checked = Boolean(profile && profile.tts_enabled);
+      note.value = SERVICE_NOTE;
+      showLanguageHint();
+      createDialog.showModal();
+      document.querySelector("#name").focus();
+    }
+
+    document.querySelector("#new-service").addEventListener("click", openCreate);
+    document.querySelector("#cancel").addEventListener("click", () => createDialog.close());
+    for (const input of document.querySelectorAll("input[name=language]")) {
+      input.addEventListener("change", showLanguageHint);
+    }
+
+    document.querySelector("#create").addEventListener("submit", async (event) => {
       event.preventDefault();
       error.textContent = "";
-      submit.disabled = true;
-      submit.textContent = "Preparing models…";
-      const names = document.querySelector("#names").value.split(/\n/).map((line) => line.trim()).filter(Boolean);
-      try {
-        const response = await fetch("/api/sessions", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({
-            speaker_language: document.querySelector("#language").value,
-            do_not_translate: names
-          })
-        });
-        const body = await response.json();
-        if (!response.ok) throw new Error(body.detail || "Could not create the session.");
-        window.location = body.operator_url;
-      } catch (err) {
-        const offline = err instanceof TypeError;
-        error.textContent = offline
-          ? "The caption service is not reachable. Open this page from the running server, then try again."
-          : err.message;
-        submit.disabled = false;
-        submit.textContent = "Create session";
+      const name = document.querySelector("#name").value.trim();
+      if (!name) {
+        error.textContent = "Give the service a name.";
+        document.querySelector("#name").focus();
+        return;
       }
+      UI.busy(submit, true, "Creating");
+      try {
+        const created = await UI.api("/api/sessions", {
+          method: "POST",
+          body: {
+            name,
+            service_date: document.querySelector("#date").value,
+            speaker_language: language(),
+            tts_enabled: document.querySelector("#voice").checked,
+            note: note.value.trim() === SERVICE_NOTE.trim() ? "" : note.value
+          },
+          fallback: "Could not create the service."
+        });
+        sessionStorage.setItem(`voiceofgod-secret-${created.id}`, created.operator_secret);
+        location.href = `/o/${created.id}`;
+      } catch (err) {
+        error.textContent = err.message;
+        UI.busy(submit, false);
+      }
+    });
+
+    load().catch((err) => {
+      list.replaceChildren(UI.el("p", { class: "alert" }, err.message));
     });
   </script>
 </body>

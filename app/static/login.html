@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Sign in · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth">
+  <div>
+    <main class="auth-card">
+      <a class="brand" href="/login"><img src="/static/icon.svg" alt=""><span>voiceofgod</span></a>
+      <h1>Sign in</h1>
+      <p class="lede">Run live English and Bahasa Indonesia captions for your church.</p>
+      <p class="alert" id="error" role="alert"></p>
+      <form id="login" novalidate>
+        <div class="field">
+          <label for="username">Username</label>
+          <input id="username" name="username" type="text" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <div class="input-group">
+            <input id="password" name="password" type="password" autocomplete="current-password" required>
+            <button class="btn" type="button" id="reveal" aria-pressed="false">Show</button>
+          </div>
+        </div>
+        <button class="btn btn-primary btn-lg btn-block" id="submit" type="submit">Sign in</button>
+      </form>
+    </main>
+    <p class="auth-foot">Here to follow a service? Scan the QR code shown in church. You do not need an account. Need an account? Ask your church admin.</p>
+  </div>
+  <script src="/static/ui.js"></script>
+  <script>
+    const form = document.querySelector("#login");
+    const error = document.querySelector("#error");
+    const submit = document.querySelector("#submit");
+    const passwordInput = document.querySelector("#password");
+    const reveal = document.querySelector("#reveal");
+
+    reveal.addEventListener("click", () => {
+      const showing = passwordInput.type === "text";
+      passwordInput.type = showing ? "password" : "text";
+      reveal.textContent = showing ? "Show" : "Hide";
+      reveal.setAttribute("aria-pressed", showing ? "false" : "true");
+    });
+
+    fetch("/api/me").then((response) => {
+      if (response.ok) location.replace("/");
+    }).catch(() => {});
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      error.textContent = "";
+      const username = document.querySelector("#username").value.trim();
+      if (!username || !passwordInput.value) {
+        error.textContent = "Enter your username and password.";
+        return;
+      }
+      UI.busy(submit, true, "Signing in");
+      try {
+        const me = await UI.api("/api/login", {
+          method: "POST",
+          body: { username, password: passwordInput.value },
+          redirect: false,
+          fallback: "Could not sign in."
+        });
+        location.href = me.church_id ? "/" : "/onboarding";
+      } catch (err) {
+        error.textContent = err.message;
+        UI.busy(submit, false);
+        passwordInput.select();
+      }
+    });
+  </script>
+</body>
+</html>

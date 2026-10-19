@@ -4,14 +4,15 @@ window.CaptionView = function (container, options) {
   const jump = options.jumpButton || null;
 
   function textFor(line) {
-    if (line.hidden) return "";
+    if (options.finalsOnly && line.state !== "final") return "";
+    if (line.hidden && !options.keepHidden) return "";
     const value = line[fieldOf()] || "";
     return value;
   }
 
   function upsert(line) {
     let node = container.querySelector(`[data-id="${CSS.escape(line.id)}"]`);
-    if (line.hidden) {
+    if (line.hidden && !options.keepHidden) {
       if (node) node.remove();
       return;
     }
@@ -31,12 +32,20 @@ window.CaptionView = function (container, options) {
     node.textContent = text;
     node.dataset.state = line.state;
     node.className = line.state === "final" ? "final" : "provisional";
+    node.classList.toggle("hidden-line", Boolean(line.hidden));
     if (options.decorate) options.decorate(node, line);
+  }
+
+  function clearProvisional(exceptId) {
+    for (const node of [...container.querySelectorAll(".provisional")]) {
+      if (!exceptId || node.dataset.id !== exceptId) node.remove();
+    }
   }
 
   function applyResume(lines, provisional) {
     for (const line of lines || []) upsert(line);
-    if (provisional && !provisional.hidden) upsert(provisional);
+    if (provisional && !provisional.hidden && !options.finalsOnly) upsert(provisional);
+    else clearProvisional();
     follow();
   }
 
@@ -46,7 +55,7 @@ window.CaptionView = function (container, options) {
       upsert(line);
       seen.add(line.id);
     }
-    if (snapshot.provisional && !snapshot.provisional.hidden) {
+    if (snapshot.provisional && !snapshot.provisional.hidden && !options.finalsOnly) {
       upsert(snapshot.provisional);
       seen.add(snapshot.provisional.id);
     }
@@ -58,11 +67,9 @@ window.CaptionView = function (container, options) {
 
   function applyEvent(event) {
     if (event.line) upsert(event.line);
-    if (event.provisional) upsert(event.provisional);
-    else if (event.type === "state" || event.type === "line" || event.type === "snapshot") {
-      for (const node of [...container.querySelectorAll(".provisional")]) {
-        if (!event.line || node.dataset.id !== event.line.id) node.remove();
-      }
+    if (event.provisional && !options.finalsOnly) upsert(event.provisional);
+    else if (event.type === "state" || event.type === "line" || event.type === "snapshot" || event.type === "resume") {
+      clearProvisional(event.line && event.line.id);
     }
     follow();
   }

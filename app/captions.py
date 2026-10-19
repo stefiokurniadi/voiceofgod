@@ -105,6 +105,7 @@ def project_line(data: dict | None, role: str, *, tombstone: bool = False) -> di
         projected["glossary_miss"] = data.get("glossary_miss") or []
         projected["full_original"] = data.get("original") or ""
         projected["full_translation"] = data.get("translation") or ""
+    projected["audio"] = bool(data.get("audio"))
     return projected
 
 
@@ -117,6 +118,9 @@ def project_session(document: dict, role: str) -> dict:
     projected = {
         "id": document["id"],
         "speaker_language": document["speaker_language"],
+        "voice": bool(document.get("voice")),
+        "service_name": document.get("service_name") or "",
+        "church_name": document.get("church_name") or "",
         "status": document["status"],
         "banner": document.get("banner") or "",
         "seq": document.get("seq") or 0,

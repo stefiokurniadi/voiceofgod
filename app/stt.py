@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 import inspect
 import logging
 import threading
 
+import httpx
+import numpy as np
+
+from app.audio import SAMPLE_RATE, float_to_pcm16
 from app.captions import Transcript, Word
 
 logger = logging.getLogger(__name__)
@@ -145,3 +150,124 @@ class WhisperRecognizer:
         if words and reject_hallucination(" ".join(word.text for word in words)):
             return Transcript([])
         return Transcript(words)
+
+
+def _duration_seconds(value) -> float:
+    text = str(value or "").strip()
+    if text.endswith("s"):
+        text = text[:-1]
+    try:
+        return max(0.0, float(text))
+    except ValueError:
+        return 0.0
+
+
+def _words_from_google(body: dict, duration: float) -> list[Word]:
+    words: list[Word] = []
+    for result in body.get("results") or []:
+        alternatives = result.get("alternatives") or []
+        if not alternatives:
+            continue
+        alternative = alternatives[0]
+        for info in alternative.get("words") or []:
+            text = (info.get("word") or "").strip()
+            if text:
+                start = info.get("startTime", info.get("startOffset"))
+                end = info.get("endTime", info.get("endOffset"))
+                words.append(Word(text, _duration_seconds(start), _duration_seconds(end)))
+        if words:
+            continue
+        transcript = (alternative.get("transcript") or "").strip()
+        if not transcript or reject_hallucination(transcript):
+            continue
+        pieces = transcript.split()
+        if not pieces:
+            continue
+        step = duration / len(pieces) if duration else 0.0
+        for index, piece in enumerate(pieces):
+            words.append(Word(piece, index * step, (index + 1) * step))
+    if words and reject_hallucination(" ".join(word.text for word in words)):
+        return []
+    return words
+
+
+class GoogleRecognizer:
+    """Speech-to-Text v1. Chirp 3 rejects an API key, so the key path uses latest_long."""
+
+    def __init__(
+        self,
+        api_key: str,
+        project: str,
+        region: str = "us",
+        model: str = "chirp_3",
+        timeout: float = 30.0,
+        client: httpx.Client | None = None,
+    ):
+        self.api_key = api_key
+        self.project = project
+        self.region = region or "us"
+        self.model = model or "chirp_3"
+        self.timeout = timeout
+        self.loaded = True
+        self._client = client or httpx.Client(timeout=timeout)
+        self._owns_client = client is None
+        self._lock = threading.Lock()
+        self.billed_once = True
+
+    def ensure_loaded(self) -> None:
+        self.loaded = True
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
+    def transcribe(self, audio, language: str, hotwords: str | None = None) -> Transcript:
+        samples = np.asarray(audio if audio is not None else [], dtype=np.float32)
+        pcm = float_to_pcm16(samples)
+        if not pcm:
+            return Transcript([])
+        language_code = "id-ID" if language == "id" else "en-US"
+        model = self.model if self.model and not self.model.startswith("chirp") else "latest_long"
+        phrases = [phrase.strip() for phrase in (hotwords or "").split(",") if phrase.strip()]
+        for hint in (
+            "grace of God",
+            "with you today",
+            "is with you",
+            "is preaching",
+            "preaching from",
+            "Holy Spirit",
+            "let us pray",
+            "open the word",
+            "Brothers and sisters",
+            "salvation is a gift",
+            "own strength",
+            "heavy heart",
+            "verse sixteen",
+            "blessing of the cross",
+            "for the first time",
+            "the congregation is listening",
+        ):
+            if hint not in phrases:
+                phrases.append(hint)
+        payload = {
+            "config": {
+                "encoding": "LINEAR16",
+                "sampleRateHertz": SAMPLE_RATE,
+                "languageCode": language_code,
+                "model": model,
+                "enableWordTimeOffsets": True,
+                "enableAutomaticPunctuation": True,
+            },
+            "audio": {"content": base64.b64encode(pcm).decode("ascii")},
+        }
+        if phrases:
+            payload["config"]["speechContexts"] = [{"phrases": phrases[:40], "boost": 12}]
+        with self._lock:
+            response = self._client.post(
+                "https://speech.googleapis.com/v1/speech:recognize",
+                headers={"x-goog-api-key": self.api_key},
+                json=payload,
+            )
+        response.raise_for_status()
+        duration = len(samples) / SAMPLE_RATE
+        return Transcript(_words_from_google(response.json(), duration))

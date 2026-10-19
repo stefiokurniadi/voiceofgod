@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from collections import defaultdict
 from datetime import datetime, timezone
+import asyncio
 import hashlib
 import hmac
 import logging
 import secrets
 
 from app.pipeline import PipelineConfig, SessionPipeline
+from app.propresenter import Stage, validate_propresenter
+from app.rtmp import UNAVAILABLE, RtmpIngest, rtmp_ready
 
 logger = logging.getLogger(__name__)
 
@@ -23,22 +26,46 @@ def token_matches(token: str, token_hash: str) -> bool:
 
 
 class Director:
-    def __init__(self, settings, repository, recognizer, translator, glossary, pipeline_config: PipelineConfig | None = None):
+    def __init__(self, settings, repository, recognizer, translator, glossary, pipeline_config: PipelineConfig | None = None, speaker=None, accounts=None):
         self.settings = settings
         self.repository = repository
+        self.accounts = accounts
         self.recognizer = recognizer
         self.translator = translator
+        self.speaker = speaker
         self.glossary = glossary
         self.pipeline_config = pipeline_config
         self.pipelines: dict[str, SessionPipeline] = {}
         self.listeners: dict[str, int] = defaultdict(int)
+        self.ingest = RtmpIngest(settings, self)
+        self.stage = Stage(self)
 
-    async def create_session(self, speaker_language: str, do_not_translate: list[str], terms: list[dict], base_url: str) -> dict:
+    async def create_session(
+        self,
+        user: dict,
+        name: str,
+        note: str,
+        service_date,
+        speaker_language: str,
+        voice: bool,
+        base_url: str,
+        do_not_translate: list[str] | None = None,
+        terms: list[dict] | None = None,
+    ) -> dict:
+        if not user.get("church_id"):
+            raise PermissionError("Set the church before creating a service.")
         if speaker_language not in {"en", "id"}:
             raise ValueError("Speaker language must be English or Bahasa Indonesia.")
-        do_not_translate = [phrase.strip() for phrase in do_not_translate if phrase and phrase.strip()]
-        if len(do_not_translate) > 100 or any(len(phrase) > 80 for phrase in do_not_translate):
+        cleaned_name = (name or "").strip() or "Service"
+        if len(cleaned_name) > 120:
+            raise ValueError("The service name is too long.")
+        if len(note or "") > 4000:
+            raise ValueError("The service note is too long.")
+        extra_names = [phrase.strip() for phrase in (do_not_translate or []) if phrase and str(phrase).strip()]
+        keep_names = [str(phrase) for phrase in list(user.get("keep_names") or []) + extra_names if str(phrase).strip()]
+        if len(keep_names) > 100 or any(len(phrase) > 80 for phrase in keep_names):
             raise ValueError("The do-not-translate list is too large.")
+        terms = terms or []
         if len(terms) > 100:
             raise ValueError("The glossary is too large.")
         self.recognizer.ensure_loaded()
@@ -47,7 +74,7 @@ class Director:
             raise RuntimeError("Translator is not ready.")
         session_id = secrets.token_urlsafe(12)
         secret = secrets.token_urlsafe(24)
-        glossary = self.glossary.merged(do_not_translate, terms)
+        glossary = self.glossary.merged(keep_names, terms)
         document = {
             "id": session_id,
             "speaker_language": speaker_language,
@@ -63,9 +90,53 @@ class Director:
             "development_translator": bool(getattr(self.translator, "development", False)),
             "created_at": datetime.now(timezone.utc).isoformat(),
             "glossary": glossary.to_dict(),
+            "voice": bool(voice),
+            "church_id": str(user["church_id"]),
+            "church_name": user.get("church_name") or "",
+            "church_note": user.get("church_note") or "",
+            "service_name": cleaned_name,
+            "service_note": (note or "").strip(),
+            "service_date": service_date.isoformat() if service_date else "",
+            "input": "browser",
+            "ingest_token": secrets.token_urlsafe(18),
+            "propresenter": {"enabled": False, "base_url": "", "message": "", "token": "Translation"},
         }
         if document["development_translator"]:
             document["banner"] = "Development translator is on. These are not real translations."
+        pipeline = self._bind(document, glossary)
+        self.pipelines[session_id] = pipeline
+        await self.repository.save(session_id, document)
+        if self.accounts is not None:
+            await self.accounts.insert_service(
+                session_id,
+                str(user["church_id"]),
+                cleaned_name,
+                (note or "").strip(),
+                service_date,
+                speaker_language,
+                bool(voice),
+                document["token_hash"],
+                document,
+            )
+        logger.info("session %s created", session_id)
+        return {
+            "id": session_id,
+            "name": cleaned_name,
+            "operator_secret": secret,
+            "operator_url": f"{base_url}/o/{session_id}?k={secret}",
+            "listener_url": f"{base_url}/l/{session_id}",
+            "speaker_language": speaker_language,
+        }
+
+    def _bind(self, document: dict, glossary=None):
+        from app.glossary import Glossary
+
+        if glossary is None:
+            raw = document.get("glossary") or {}
+            try:
+                glossary = Glossary.from_public(raw.get("terms") or [], raw.get("do_not_translate") or [])
+            except ValueError:
+                glossary = self.glossary
         pipeline = SessionPipeline(
             document,
             self.repository,
@@ -73,17 +144,47 @@ class Director:
             self.translator,
             glossary,
             self.pipeline_config,
+            self.speaker,
         )
-        self.pipelines[session_id] = pipeline
-        await self.repository.save(session_id, document)
-        logger.info("session %s created", session_id)
-        return {
-            "id": session_id,
-            "operator_secret": secret,
-            "operator_url": f"{base_url}/o/{session_id}?k={secret}",
-            "listener_url": f"{base_url}/l/{session_id}",
-            "speaker_language": speaker_language,
-        }
+        pipeline.durable = self._durable
+        return pipeline
+
+    async def _durable(self, document: dict) -> None:
+        if self.accounts is not None:
+            await self.accounts.save_document(document["id"], document)
+
+    async def remember(self, session_id: str) -> None:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is not None:
+            await self._durable(pipeline.doc)
+
+    async def restore(self) -> int:
+        from app.glossary import Glossary
+
+        restored = 0
+        for session_id in await self.repository.list_ids():
+            if session_id in self.pipelines:
+                continue
+            document = await self.repository.load(session_id)
+            if not document or document.get("status") == "deleted":
+                continue
+            raw = document.get("glossary") or {}
+            try:
+                glossary = Glossary.from_public(raw.get("terms") or [], raw.get("do_not_translate") or [])
+            except ValueError:
+                glossary = self.glossary
+            if document.get("status") in {"live", "paused"}:
+                document["status"] = "paused"
+                document["banner"] = "The caption service restarted. Press Start to continue."
+                document.setdefault("metrics", {})["listeners"] = 0
+            pipeline = self._bind(document, glossary)
+            self.pipelines[session_id] = pipeline
+            await self.repository.save(session_id, document)
+            restored += 1
+        if restored:
+            await asyncio.to_thread(self.recognizer.ensure_loaded)
+            logger.info("restored %s sessions", restored)
+        return restored
 
     def pipeline(self, session_id: str) -> SessionPipeline | None:
         return self.pipelines.get(session_id)
@@ -112,14 +213,26 @@ class Director:
         if self.live_count() >= self.settings.max_live_sessions:
             raise RuntimeError(f"This server is already running {self.settings.max_live_sessions} sessions.")
         await pipeline.start()
+        if pipeline.doc.get("input") == "rtmp":
+            if not rtmp_ready(self.settings):
+                await pipeline._set_status("live", UNAVAILABLE)
+            else:
+                await self.ingest.start(session_id)
+        await self.stage.start(session_id)
 
     async def stop(self, session_id: str) -> None:
         pipeline = self.pipelines.get(session_id)
         if pipeline is None:
             raise KeyError(session_id)
+        await self.ingest.stop(session_id)
         await pipeline.stop()
+        await self.stage.clear_session(session_id)
+        await self.stage.stop(session_id)
 
     async def delete(self, session_id: str) -> None:
+        await self.ingest.stop(session_id)
+        await self.stage.clear_session(session_id)
+        await self.stage.stop(session_id)
         pipeline = self.pipelines.get(session_id)
         if pipeline is not None and pipeline.started and pipeline.doc.get("status") != "ended":
             await pipeline.stop()
@@ -144,7 +257,92 @@ class Director:
             pipeline.glossary = glossary
             pipeline.doc["glossary"] = glossary.to_dict()
         await pipeline._emit("status")
+        await self.remember(session_id)
         return glossary.to_dict()
+
+    async def set_input(self, session_id: str, source: str) -> str:
+        if source not in {"browser", "rtmp"}:
+            raise ValueError("Audio source must be the microphone or OBS.")
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        if pipeline.started and pipeline.doc.get("status") != "ended":
+            raise RuntimeError("End the session before changing the audio source.")
+        async with pipeline.lock:
+            pipeline.doc["input"] = source
+        await pipeline._emit("status")
+        await self.remember(session_id)
+        return source
+
+    async def set_propresenter(self, session_id: str, raw: dict) -> dict:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        saved = validate_propresenter(raw)
+        async with pipeline.lock:
+            pipeline.doc["propresenter"] = saved
+        await pipeline._emit("status")
+        if pipeline.started and pipeline.doc.get("status") != "ended":
+            await self.stage.start(session_id)
+        await self.remember(session_id)
+        return saved
+
+    async def shutdown(self) -> None:
+        await self.ingest.shutdown()
+        await self.stage.shutdown()
+
+    async def set_service_voice(self, session_id: str, enabled: bool) -> bool:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        await pipeline.set_voice(enabled)
+        await self.remember(session_id)
+        return bool(enabled)
+
+    async def apply_church(self, church_id: str, name: str, note: str) -> None:
+        for pipeline in list(self.pipelines.values()):
+            if str(pipeline.doc.get("church_id") or "") != str(church_id):
+                continue
+            async with pipeline.lock:
+                pipeline.doc["church_name"] = name
+                pipeline.doc["church_note"] = note
+            await self._durable(pipeline.doc)
+
+    def _may_open(self, document, *, church_id: str | None, token: str | None, public: bool) -> bool:
+        if public:
+            return True
+        if church_id is not None and str(document.get("church_id") or "") == str(church_id):
+            return True
+        return bool(token) and token_matches(token, document.get("token_hash", ""))
+
+    async def ensure_loaded(self, session_id: str, *, church_id: str | None = None, token: str | None = None, public: bool = False):
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is not None:
+            document = pipeline.doc
+            if self._may_open(document, church_id=church_id, token=token, public=public):
+                return document
+            return None
+        if self.accounts is None:
+            return await self.repository.load(session_id)
+        row = await self.accounts.load_service(session_id)
+        if row is None or row["status"] == "deleted":
+            return None
+        if not self._may_open(row, church_id=church_id, token=token, public=public):
+            return None
+        document = row["document"]
+        if isinstance(document, str):
+            import json
+            document = json.loads(document)
+        if document.get("status") in {"live", "paused"}:
+            document["status"] = "paused"
+            document["banner"] = "The caption service restarted. Press Start to continue."
+            document.setdefault("metrics", {})["listeners"] = 0
+        self.recognizer.ensure_loaded()
+        pipeline = self._bind(document)
+        self.pipelines[session_id] = pipeline
+        await self.repository.save(session_id, document)
+        await self._durable(document)
+        return document
 
     async def note_listeners(self, session_id: str, delta: int) -> None:
         self.listeners[session_id] = max(0, self.listeners[session_id] + delta)

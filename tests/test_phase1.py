@@ -14,7 +14,7 @@ from app.pipeline import PipelineConfig, SessionPipeline
 from app.scripture import find_citations, is_long_reading, primary_citation
 from app.store import MemoryRepository
 from app.stt import GrowingRecognizer, ScriptedRecognizer
-from app.translator import GlossaryTranslator, build_user_message, TranslationRequest
+from app.translator import SYSTEM_PROMPT, GlossaryTranslator, build_user_message, TranslationRequest
 from eval.scoring import chrf, wer
 
 
@@ -146,6 +146,46 @@ def test_prompt_includes_context_and_formal_rule():
     assert "Halo jemaat" in message
     assert "[[T0]]" in message
     assert "Bahasa Indonesia" in message
+    assert "Anda" in SYSTEM_PROMPT
+    assert "natural" in SYSTEM_PROMPT
+    assert "fragment" in SYSTEM_PROMPT
+    assert "Injil Yohanes" in SYSTEM_PROMPT
+
+
+def test_a_scrap_stays_on_the_line_it_continues():
+    from app.pipeline import _join_caption, _should_attach, polish_translation
+
+    assert _should_attach("John chapter 3.", "For 16.", 0.4, 1.6)
+    assert _should_attach("Parents and sisters,", "The blessing of the cross.", 0.5, 1.6)
+    assert _should_attach("something we earn by our", "Try.", 0.3, 1.6)
+    assert not _should_attach("Good morning church.", "The grace of God is with you today.", 0.8, 1.6)
+    assert not _should_attach("Hello church this morning.", "A completely different sentence.", 0.4, 1.6)
+    assert not _should_attach("Please be seated.", "Amen.", 0.4, 1.6)
+    assert _join_caption("John chapter 3.", "For 16.") == "John chapter 3. For 16."
+    assert _join_caption("Parents and sisters,", "The blessing of the cross.") == "Parents and sisters, the blessing of the cross."
+    assert polish_translation("anugerah dari Allah menyertai Anda hari ini.", {"Allah", "Anda"}) == "Anugerah dari Allah menyertai Anda hari ini."
+    assert polish_translation("Roh Kudus Menghibur setiap orang.", {"Roh", "Kudus"}) == "Roh Kudus menghibur setiap orang."
+
+
+@pytest.mark.asyncio
+async def test_a_following_scrap_is_folded_into_the_open_line():
+    pipe = pipeline_for(["pastor", "John", "chapter", "3."])
+    await speak(pipe)
+    pipe.recognizer.words = ["For", "16."]
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    finals = [line["original"] for line in pipe.doc["lines"] if line.get("state") == "final"]
+    assert finals == ["pastor John chapter 3. For 16."]
+
+
+def test_a_pause_inside_one_breath_is_not_a_new_sentence():
+    from app.pipeline import _join_false_periods
+
+    assert _join_false_periods("The Holy Spirit. Comforts the congregation.") == "The Holy Spirit comforts the congregation."
+    assert _join_false_periods("Holy Spirit, Comforts the congregation.") == "Holy Spirit comforts the congregation."
+    assert _join_false_periods("Pastor, John is preaching.") == "Pastor, John is preaching."
+    assert _join_false_periods("Good morning church.") == "Good morning church."
 
 
 def test_wer_and_chrf():
@@ -233,37 +273,37 @@ async def test_hide_removes_the_line_for_listeners():
 
 
 @pytest.mark.asyncio
-async def test_sentence_split_keeps_the_tail():
+async def test_a_period_does_not_end_the_line_while_the_speaker_continues():
     config = PipelineConfig(**{**FAST.__dict__, "decode_interval_seconds": 0.25, "min_sentence_words": 4})
     glossary = Glossary.load(GLOSSARY_PATH)
     recognizer = GrowingRecognizer(["Please", "open", "your", "Bible.", "Then", "we", "sing"])
     pipe = SessionPipeline(document(), MemoryRepository(), recognizer, GlossaryTranslator(), glossary, config)
     await pipe.start()
-    await feed(pipe, 1.5, 0.25)
+    await feed(pipe, 2.6, 0.25)
     await pipe.idle()
-    await feed(pipe, 0.8, 0.25)
+    assert pipe.doc["lines"] == []
+    await feed(pipe, 0.5, 0.0)
     await pipe.idle()
     finals = [line["original"] for line in pipe.doc["lines"]]
-    assert any("Bible." in line for line in finals)
-    assert all(not line.endswith("sing") or "Bible." not in line for line in finals)
+    assert len(finals) == 1
+    assert "Bible" in finals[0]
+    assert "sing" in finals[0]
 
 
 @pytest.mark.asyncio
 async def test_api_session_projects_listener_without_the_operator_secret():
-    app = create_app(
-        Settings(allow_fake_models=True, require_translator=False, require_redis=False, max_live_sessions=1),
-        repository=MemoryRepository(),
-        recognizer=ScriptedRecognizer(["Hello", "church", "this", "morning"]),
-        translator=GlossaryTranslator(),
-        pipeline_config=FAST,
-    )
+    from tests.church import make_app, sign_in
+
+    app = await make_app(["Hello", "church", "this", "morning"], max_live=1)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
+        await sign_in(client)
         created = await client.post("/api/sessions", json={"speaker_language": "en", "do_not_translate": ["Grace Church"]})
         assert created.status_code == 200
         body = created.json()
         assert body["operator_secret"] not in body["listener_url"]
-        denied = await client.get(f"/api/sessions/{body['id']}")
+        async with AsyncClient(transport=transport, base_url="http://test") as stranger:
+            denied = await stranger.get(f"/api/sessions/{body['id']}")
         assert denied.status_code == 401
         started = await client.post(
             f"/api/sessions/{body['id']}/start",

@@ -16,8 +16,8 @@ Whisper and vLLM share one GPU. If a session dies with an out-of-memory error, l
 
 Not measured. The Phase 2 test to run, on the real box, is four pipelines at once and 500 caption subscribers on one of them. Subscribers must not each load a model. Until that test is written up here with the GPU name, the power draw, and the caption latency, the only supported live load is one session.
 
-Listener captions are small text messages. Translated audio in Phase 3 is a separate egress question and is not part of this number.
+Listener captions are small text messages. Spoken translation is generated once per final line and kept in memory. Five hundred listeners each pulling that audio has not been measured. Until it is, listen mode is not a supported load at that occupancy. Captions remain the mode for a full room.
 
 ## Cost per service-hour
 
-Not measured. When the GPU box is known, record the machine's hourly price (or its power draw times the local tariff) and divide by the number of sessions that box actually sustained. A guess does not belong in this file.
+Not measured on a GPU. The hosted Google path uses published list prices, not a timed service on this machine: about $0.016 per minute of speech for Chirp, about $1.50 / $9 per million Gemini 3.5 Flash tokens with thinking off, and WaveNet at $16 per million characters after one million free characters in a month. A two-hour service with about 70 minutes of talking is about $2.05 while that voice allowance lasts. Listeners do not multiply the API bill. A guess of GPU cost still does not belong here.

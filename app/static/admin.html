@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Users · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar"></header>
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <h1>Users</h1>
+        <p>Only an admin can add people. Give each operator their own account.</p>
+      </div>
+      <button class="btn btn-primary btn-lg" type="button" id="add">Add user</button>
+    </div>
+    <div class="card">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>User</th><th>Role</th><th>Church</th><th>Status</th><th><span class="visually-hidden">Actions</span></th></tr>
+          </thead>
+          <tbody id="users">
+            <tr><td colspan="5" class="muted">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+  <script src="/static/ui.js"></script>
+  <script>
+    const { el } = UI;
+    const users = document.querySelector("#users");
+    let me = null;
+
+    function passwordField(id) {
+      const input = el("input", { id, type: "text", autocomplete: "off", spellcheck: "false", minlength: "8", required: true });
+      const generate = el("button", { class: "btn", type: "button" }, "Generate");
+      generate.addEventListener("click", () => { input.value = UI.password(); input.select(); });
+      return {
+        input,
+        node: el("div", { class: "field" },
+          el("label", { for: id }, "Password"),
+          el("div", { class: "input-group" }, input, generate),
+          el("p", { class: "hint" }, "At least 8 characters. Share it privately. They can sign in right away.")
+        )
+      };
+    }
+
+    function openAdd() {
+      const alert = el("p", { class: "alert", role: "alert" });
+      const username = el("input", { id: "new-username", type: "text", autocomplete: "off", autocapitalize: "none", spellcheck: "false", required: true });
+      const secret = passwordField("new-password");
+      const submit = el("button", { class: "btn btn-primary", type: "submit" }, "Create user");
+      const node = UI.dialog({
+        title: "Add user",
+        description: "They sign in, set up their church, and create services.",
+        body: [
+          alert,
+          el("div", { class: "field" },
+            el("label", { for: "new-username" }, "Username"),
+            username,
+            el("p", { class: "hint" }, "3 to 40 letters, numbers, dots, or hyphens.")
+          ),
+          secret.node
+        ],
+        actions: [el("button", { class: "btn", value: "cancel", formnovalidate: true }, "Cancel"), submit]
+      });
+      username.focus();
+      node.querySelector("form").addEventListener("submit", async (event) => {
+        if (event.submitter && event.submitter.value === "cancel") return;
+        event.preventDefault();
+        alert.textContent = "";
+        UI.busy(submit, true, "Creating");
+        try {
+          await UI.api("/api/admin/users", {
+            method: "POST",
+            body: { username: username.value.trim(), password: secret.input.value },
+            fallback: "Could not create the user."
+          });
+          node.close();
+          UI.toast(`${username.value.trim().toLowerCase()} can sign in now`, "success");
+          await load();
+        } catch (err) {
+          alert.textContent = err.message;
+          UI.busy(submit, false);
+        }
+      });
+    }
+
+    function openPassword(user) {
+      const alert = el("p", { class: "alert", role: "alert" });
+      const secret = passwordField("reset-password");
+      const submit = el("button", { class: "btn btn-primary", type: "submit" }, "Set password");
+      const node = UI.dialog({
+        title: `New password for ${user.username}`,
+        description: "They are signed out everywhere and must use the new password.",
+        body: [alert, secret.node],
+        actions: [el("button", { class: "btn", value: "cancel", formnovalidate: true }, "Cancel"), submit]
+      });
+      secret.input.focus();
+      node.querySelector("form").addEventListener("submit", async (event) => {
+        if (event.submitter && event.submitter.value === "cancel") return;
+        event.preventDefault();
+        alert.textContent = "";
+        UI.busy(submit, true, "Saving");
+        try {
+          await UI.api(`/api/admin/users/${encodeURIComponent(user.id)}/password`, {
+            method: "POST",
+            body: { password: secret.input.value },
+            fallback: "Could not set the password."
+          });
+          node.close();
+          UI.toast("Password updated", "success");
+        } catch (err) {
+          alert.textContent = err.message;
+          UI.busy(submit, false);
+        }
+      });
+    }
+
+    async function toggle(user) {
+      const disabling = !user.disabled;
+      if (disabling) {
+        const ok = await UI.confirmAction({
+          title: `Disable ${user.username}?`,
+          message: "They are signed out now and cannot sign in until you enable them again. Their church and services stay.",
+          confirm: "Disable",
+          danger: true
+        });
+        if (!ok) return;
+      }
+      try {
+        await UI.api(`/api/admin/users/${encodeURIComponent(user.id)}/disabled`, {
+          method: "POST",
+          body: { disabled: disabling },
+          fallback: "Could not update the user."
+        });
+        UI.toast(disabling ? `${user.username} is disabled` : `${user.username} can sign in again`, "success");
+        await load();
+      } catch (err) {
+        UI.toast(err.message, "error");
+      }
+    }
+
+    function row(user) {
+      const self = me && user.username === me.username;
+      const actions = [el("button", { class: "btn btn-sm", type: "button", onclick: () => openPassword(user) }, "Reset password")];
+      if (!self) {
+        actions.push(el("button", {
+          class: user.disabled ? "btn btn-sm" : "btn btn-sm btn-danger",
+          type: "button",
+          onclick: () => toggle(user)
+        }, user.disabled ? "Enable" : "Disable"));
+      }
+      return el("tr", {},
+        el("td", {}, el("div", { class: "user-cell" },
+          el("span", { class: "avatar", "aria-hidden": "true" }, user.username.slice(0, 1)),
+          el("span", {}, el("strong", {}, user.username), self ? el("span", { class: "muted" }, " · you") : null)
+        )),
+        el("td", {}, user.role === "admin" ? "Admin" : "Operator"),
+        el("td", { class: user.church_name ? "" : "muted" }, user.church_name || "Not set up"),
+        el("td", {}, user.disabled
+          ? el("span", { class: "badge badge-ended" }, "Disabled")
+          : el("span", { class: "badge badge-ready" }, "Active")),
+        el("td", { class: "actions" }, actions)
+      );
+    }
+
+    async function load() {
+      const body = await UI.api("/api/admin/users");
+      users.replaceChildren(...(body.users || []).map(row));
+    }
+
+    document.querySelector("#add").addEventListener("click", openAdd);
+
+    UI.session({ church: false }).then(async (profile) => {
+      me = profile;
+      if (profile.role !== "admin") {
+        location.replace("/");
+        return;
+      }
+      UI.header(profile, "users");
+      await load();
+    }).catch((err) => UI.toast(err.message, "error"));
+  </script>
+</body>
+</html>

@@ -5,6 +5,13 @@ import numpy as np
 SAMPLE_RATE = 16000
 
 
+def float_to_pcm16(audio: np.ndarray) -> bytes:
+    if audio is None or len(audio) == 0:
+        return b""
+    clipped = np.clip(np.asarray(audio, dtype=np.float32), -1.0, 1.0)
+    return (clipped * 32767.0).astype("<i2").tobytes()
+
+
 def pcm16_to_float(pcm: bytes) -> np.ndarray:
     if not pcm:
         return np.zeros(0, dtype=np.float32)

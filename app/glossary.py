@@ -128,6 +128,22 @@ class Glossary:
         phrases.extend(self.do_not_translate)
         return ", ".join(phrases[:40])
 
+    def preferred_casing(self, text: str) -> str:
+        phrases = sorted(
+            {phrase for phrase in ([term.en for term in self.terms] + list(self.do_not_translate)) if phrase},
+            key=len,
+            reverse=True,
+        )
+        if not phrases:
+            return text
+        pattern = "|".join(rf"(?<![\w]){re.escape(phrase)}(?![\w])" for phrase in phrases)
+        preferred = {phrase.casefold(): phrase for phrase in phrases}
+
+        def replace(match: re.Match) -> str:
+            return preferred[match.group(0).casefold()]
+
+        return re.sub(pattern, replace, text, flags=re.IGNORECASE)
+
     def protect(self, text: str, source_language: str) -> Protection:
         candidates: list[tuple[int, int, str, str]] = []
         for phrase in sorted(self.do_not_translate, key=len, reverse=True):
