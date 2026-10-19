@@ -539,10 +539,16 @@
       stopButton.disabled = true;
     }
 
+    function goToSignIn() {
+      stopped = true;
+      location.href = "/login";
+    }
+
     async function load() {
       const response = await fetch(`/api/sessions/${sessionId}`, { headers });
       if (!response.ok) {
-        shutDown(response.status === 404 ? "This service no longer exists." : "This console link is not valid. Sign in or ask for a new link.");
+        if (response.status === 404) shutDown("This service no longer exists.");
+        else goToSignIn();
         return;
       }
       paint(await response.json());
@@ -560,10 +566,11 @@
         const event = JSON.parse(message.data);
         remember(event);
         if (event.type === "deleted" || event.type === "unauthorized") {
-          shutDown(event.type === "deleted" ? "This service was deleted." : "This console link is not valid. Sign in or ask for a new link.");
           document.querySelector("#original").replaceChildren();
           document.querySelector("#translation").replaceChildren();
           socket.close();
+          if (event.type === "deleted") shutDown("This service was deleted.");
+          else goToSignIn();
           return;
         }
         if (event.type === "snapshot") { paint(event); return; }
