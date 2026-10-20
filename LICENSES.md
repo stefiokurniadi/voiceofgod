@@ -29,6 +29,8 @@ Checked 18 October 2026 against the current upstream licence text. "Commercial" 
 | segno | 1.6.6 | BSD-3-Clause | yes | https://github.com/heuer/segno/blob/master/LICENSE |
 | MediaMTX | Docker image `bluenviron/mediamtx:1.13.1` | MIT | yes | https://github.com/bluenviron/mediamtx/blob/main/LICENSE |
 | FFmpeg | Debian bookworm `ffmpeg` package, invoked as its own process | GPL-2.0-or-later for the Debian build | yes | https://ffmpeg.org/legal.html |
+| yt-dlp | >=2025.10.14, admin YouTube test only | Unlicense | yes | https://github.com/yt-dlp/yt-dlp/blob/master/LICENSE |
+| Node.js | Debian bookworm `nodejs` package, yt-dlp's JavaScript runtime | MIT | yes | https://github.com/nodejs/node/blob/main/LICENSE |
 | Cloud Speech-to-Text V2 (`chirp_3`) | Google Cloud API, checked 18 October 2026 | Google Cloud terms, not an open-source weight | yes, as a paid API | https://cloud.google.com/speech-to-text/docs/models/chirp-3 |
 | Gemini 3.5 Flash | `gemini-3.5-flash`, checked 18 October 2026 | Gemini API terms, not an open-source weight | yes, on the paid tier | https://ai.google.dev/gemini-api/docs/pricing |
 | Cloud Text-to-Speech WaveNet | `en-US-Wavenet-D`, `id-ID-Wavenet-B`, checked 18 October 2026 | Google Cloud terms, not an open-source weight | yes, as a paid API | https://cloud.google.com/text-to-speech/docs/voices |

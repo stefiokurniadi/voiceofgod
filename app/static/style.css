@@ -211,7 +211,8 @@ textarea.tall { min-height: 10rem; }
 }
 .segmented input:checked + span { background: var(--surface-3); color: var(--ink); }
 .segmented input:focus-visible + span { outline: 2px solid var(--accent); outline-offset: 1px; }
-.segmented.block { display: flex; }
+.segmented.block { display: flex; flex-wrap: wrap; }
+.segmented.block label { flex: 1 1 auto; }
 
 .switch {
   display: flex;

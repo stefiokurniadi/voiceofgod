@@ -111,19 +111,34 @@ class Glossary:
             phrases.append(text)
         return cls(cleaned, list(dict.fromkeys(phrases)))
 
-    def source_pairs(self, source_language: str) -> list[tuple[str, str]]:
+    def source_pairs(self, source_language: str, caption_language: str | None = None) -> list[tuple[str, str]]:
         pairs: list[tuple[str, str]] = []
-        for term in self.terms:
-            if source_language == "en":
-                pairs.append((term.en, term.id))
-            else:
-                pairs.append((term.id, term.en))
-                for alias in term.id_aliases:
-                    pairs.append((alias, term.en))
+        if source_language == "mix":
+            target = caption_language if caption_language in {"en", "id"} else "id"
+            for term in self.terms:
+                replacement = term.id if target == "id" else term.en
+                for phrase in (term.en, term.id, *term.id_aliases):
+                    if phrase:
+                        pairs.append((phrase, replacement))
+        else:
+            for term in self.terms:
+                if source_language == "en":
+                    pairs.append((term.en, term.id))
+                else:
+                    pairs.append((term.id, term.en))
+                    for alias in term.id_aliases:
+                        pairs.append((alias, term.en))
         pairs.sort(key=lambda pair: len(pair[0]), reverse=True)
         return pairs
 
     def hotwords(self, source_language: str) -> str:
+        if source_language == "mix":
+            phrases: list[str] = []
+            for term in self.terms:
+                phrases.extend([term.en, term.id, *term.id_aliases])
+            phrases.extend(self.do_not_translate)
+            unique = list(dict.fromkeys(phrase for phrase in phrases if phrase))
+            return ", ".join(unique[:200])
         phrases = [source for source, _target in self.source_pairs(source_language)]
         phrases.extend(self.do_not_translate)
         return ", ".join(phrases[:40])
@@ -144,12 +159,12 @@ class Glossary:
 
         return re.sub(pattern, replace, text, flags=re.IGNORECASE)
 
-    def protect(self, text: str, source_language: str) -> Protection:
+    def protect(self, text: str, source_language: str, caption_language: str | None = None) -> Protection:
         candidates: list[tuple[int, int, str, str]] = []
         for phrase in sorted(self.do_not_translate, key=len, reverse=True):
             for match in _find(phrase, text):
                 candidates.append((match.start(), match.end(), match.group(0), match.group(0)))
-        for source, target in self.source_pairs(source_language):
+        for source, target in self.source_pairs(source_language, caption_language):
             for match in _find(source, text):
                 candidates.append((match.start(), match.end(), match.group(0), target))
         candidates.sort(key=lambda item: (-(item[1] - item[0]), item[0]))

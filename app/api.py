@@ -31,6 +31,7 @@ def _event_for(event: dict, role: str) -> dict:
         "status": event.get("status"),
         "banner": event.get("banner") or "",
         "speaker_language": event.get("speaker_language"),
+        "translation_language": event.get("translation_language"),
         "voice": bool(event.get("voice")),
         "line": project_line(event.get("line"), role, tombstone=True) if event.get("line") else None,
         "provisional": project_line(event.get("provisional"), role, tombstone=True) if event.get("provisional") else None,
@@ -197,6 +198,7 @@ def _me(user: dict) -> dict:
         "church_note": user.get("church_note") or "",
         "keep_names": user.get("keep_names") or [],
         "speaker_language": user["speaker_language"],
+        "translation_language": user.get("translation_language") or "id",
         "tts_enabled": user["tts_enabled"],
         "church_template": CHURCH_NOTE,
     }
@@ -231,10 +233,11 @@ async def put_settings(request: Request):
     body = await request.json()
     language = body.get("speaker_language", user["speaker_language"])
     enabled = body.get("tts_enabled", user["tts_enabled"])
+    caption = body.get("translation_language", user.get("translation_language") or "id")
     if not isinstance(enabled, bool):
         raise HTTPException(400, "Spoken translation must be on or off.")
     try:
-        saved = await request.app.state.accounts.save_preferences(user["id"], language, enabled)
+        saved = await request.app.state.accounts.save_preferences(user["id"], language, enabled, caption)
         if "name" in body or "note" in body or "keep_names" in body:
             saved = await request.app.state.accounts.save_church(
                 user["id"],
@@ -246,6 +249,52 @@ async def put_settings(request: Request):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     return _me(saved)
+
+
+@router.get("/api/admin/youtube")
+async def admin_youtube_status(request: Request):
+    await _require_admin(request)
+    return request.app.state.director.youtube_view(_base_url(request))
+
+
+@router.post("/api/admin/youtube")
+async def admin_youtube_start(request: Request):
+    await _require_admin(request)
+    body = await request.json()
+    language = body.get("speaker_language") or "en"
+    try:
+        created = await request.app.state.director.create_youtube_test(
+            str(body.get("url") or ""),
+            str(language),
+            _base_url(request),
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        text = str(exc)
+        status = 503 if "not ready" in text else 409
+        raise HTTPException(status, text) from exc
+    return created
+
+
+@router.post("/api/admin/youtube/stop")
+async def admin_youtube_stop(request: Request):
+    await _require_admin(request)
+    try:
+        await request.app.state.director.stop_youtube_test()
+    except KeyError:
+        raise HTTPException(404, "No YouTube test is running.") from None
+    return {"ok": True}
+
+
+@router.post("/api/admin/youtube/seek")
+async def admin_youtube_seek(request: Request):
+    await _require_admin(request)
+    pipeline = request.app.state.director.active_youtube()
+    if pipeline is None:
+        raise HTTPException(404, "No YouTube test is running.")
+    body = await request.json()
+    return await _seek_youtube(request, pipeline.doc["id"], body)
 
 
 @router.get("/api/admin/users")
@@ -315,6 +364,7 @@ async def create_session(request: Request):
     user = await _require_user(request)
     body = await request.json()
     speaker_language = body.get("speaker_language") or user["speaker_language"]
+    translation_language = body.get("translation_language", user.get("translation_language"))
     voice = body.get("tts_enabled")
     if voice is None:
         voice = user["tts_enabled"]
@@ -335,6 +385,7 @@ async def create_session(request: Request):
             _base_url(request),
             [str(item) for item in do_not_translate],
             terms,
+            translation_language,
         )
     except PermissionError as exc:
         raise HTTPException(400, str(exc)) from exc
@@ -378,13 +429,18 @@ async def delete_session(session_id: str, request: Request):
 async def set_language(session_id: str, request: Request):
     await _operator_document(request, session_id)
     body = await request.json()
+    from app.translator import CAPTION_LANGUAGE_ERROR, SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR
+
     language = body.get("speaker_language")
-    if language not in {"en", "id"}:
-        raise HTTPException(400, "Speaker language must be English or Bahasa Indonesia.")
+    if language not in SPEAKER_LANGUAGES:
+        raise HTTPException(400, SPEAKER_LANGUAGE_ERROR)
+    caption = body.get("translation_language")
+    if language == "mix" and caption not in (None, "", "en", "id"):
+        raise HTTPException(400, CAPTION_LANGUAGE_ERROR)
     pipeline = request.app.state.director.pipeline(session_id)
     if pipeline is None:
         raise HTTPException(404, "Session not found.")
-    await pipeline.set_language(language)
+    await pipeline.set_language(language, caption)
     await request.app.state.director.remember(session_id)
     return {"ok": True}
 
@@ -496,11 +552,33 @@ async def test_propresenter(session_id: str, request: Request):
     return {"ok": True, "id": message_id}
 
 
+@router.post("/api/sessions/{session_id}/youtube/seek")
+async def session_youtube_seek(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    body = await request.json()
+    return await _seek_youtube(request, session_id, body)
+
+
+async def _seek_youtube(request: Request, session_id: str, body: dict) -> dict:
+    value = body.get("seconds") if isinstance(body, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise HTTPException(400, "The time has to be a number of seconds.")
+    try:
+        return await request.app.state.director.seek_youtube(session_id, float(value))
+    except KeyError:
+        raise HTTPException(404, "Session not found.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
 @router.get("/api/sessions/{session_id}/level")
 async def session_level(session_id: str, request: Request):
     await _operator_document(request, session_id)
     pipeline = request.app.state.director.pipeline(session_id)
-    return {"level": float(pipeline.input_level) if pipeline is not None else 0.0}
+    payload = {"level": float(pipeline.input_level) if pipeline is not None else 0.0}
+    if pipeline is not None and pipeline.doc.get("input") == "youtube":
+        payload.update(request.app.state.director.youtube_position(pipeline))
+    return payload
 
 
 @router.post("/internal/rtmp-auth/{secret}")
@@ -562,7 +640,7 @@ async def session_metrics(session_id: str, request: Request):
 async def export_txt(session_id: str, request: Request):
     document = await _export_document(request, session_id)
     projected = project_session(document, "listener")
-    body = render_txt(projected["lines"], document["speaker_language"])
+    body = render_txt(projected["lines"], document["speaker_language"], document.get("translation_language"))
     return Response(
         body,
         media_type="text/plain; charset=utf-8",
@@ -685,7 +763,7 @@ async def operate(websocket: WebSocket, session_id: str):
             if message["type"] == "websocket.disconnect":
                 break
             if message.get("bytes"):
-                if pipeline.doc.get("input") != "rtmp":
+                if pipeline.doc.get("input") == "browser":
                     await pipeline.accept_pcm(message["bytes"])
             elif message.get("text"):
                 try:
@@ -695,9 +773,22 @@ async def operate(websocket: WebSocket, session_id: str):
                 if payload.get("type") == "capture" and payload.get("state") == "denied":
                     await pipeline._set_status("paused", "Microphone permission was denied")
 
+    async def pump_monitor():
+        if pipeline.doc.get("input") != "youtube":
+            await asyncio.Future()
+            return
+        queue = pipeline.attach_monitor()
+        try:
+            while True:
+                chunk = await queue.get()
+                await websocket.send_bytes(chunk)
+        finally:
+            pipeline.detach_monitor(queue)
+
     event_task = asyncio.create_task(pump_events())
     audio_task = asyncio.create_task(pump_audio())
-    done, pending = await asyncio.wait({event_task, audio_task}, return_when=asyncio.FIRST_COMPLETED)
+    monitor_task = asyncio.create_task(pump_monitor())
+    done, pending = await asyncio.wait({event_task, audio_task, monitor_task}, return_when=asyncio.FIRST_COMPLETED)
     for task in pending:
         task.cancel()
     for task in done:

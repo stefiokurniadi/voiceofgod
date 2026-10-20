@@ -53,9 +53,17 @@
       <div class="card-body">
         <div class="field">
           <span class="label" id="language-label">The preacher usually speaks</span>
-          <div class="segmented" role="radiogroup" aria-labelledby="language-label">
+          <div class="segmented block" role="radiogroup" aria-labelledby="language-label">
             <label><input type="radio" name="language" value="en"><span>English</span></label>
             <label><input type="radio" name="language" value="id"><span>Bahasa Indonesia</span></label>
+            <label><input type="radio" name="language" value="mix"><span>Mixed</span></label>
+          </div>
+        </div>
+        <div class="field" id="caption-field" hidden>
+          <span class="label" id="caption-label">Listeners read</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="caption-label">
+            <label><input type="radio" name="caption" value="id" checked><span>Bahasa Indonesia</span></label>
+            <label><input type="radio" name="caption" value="en"><span>English</span></label>
           </div>
         </div>
         <div class="field">
@@ -85,6 +93,9 @@
       document.querySelector("#note").value = profile.church_note || "";
       const speaker = profile.speaker_language || "en";
       document.querySelector(`input[name=language][value="${speaker}"]`).checked = true;
+      const caption = profile.translation_language === "en" ? "en" : "id";
+      document.querySelector(`input[name=caption][value="${caption}"]`).checked = true;
+      document.querySelector("#caption-field").hidden = speaker !== "mix";
       document.querySelector("#tts").checked = Boolean(profile.tts_enabled);
     }
 
@@ -121,9 +132,16 @@
       event.preventDefault();
       save(document.querySelector("#defaults-save"), {
         speaker_language: document.querySelector("input[name=language]:checked").value,
+        translation_language: document.querySelector("input[name=caption]:checked").value,
         tts_enabled: document.querySelector("#tts").checked
       }, "Defaults saved");
     });
+
+    for (const input of document.querySelectorAll("input[name=language]")) {
+      input.addEventListener("change", () => {
+        document.querySelector("#caption-field").hidden = input.value !== "mix" || !input.checked;
+      });
+    }
 
     UI.session().then((profile) => {
       UI.header(profile, "settings");

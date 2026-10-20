@@ -21,6 +21,7 @@ dependencies = [
     "asyncpg>=0.30",
     "segno>=1.6",
     "faster-whisper>=1.1.0",
+    "yt-dlp>=2025.10.14",
 ]
 
 [project.optional-dependencies]

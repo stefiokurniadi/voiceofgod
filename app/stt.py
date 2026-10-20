@@ -119,7 +119,6 @@ class WhisperRecognizer:
         from faster_whisper.vad import VadOptions
 
         options = {
-            "language": language,
             "task": "transcribe",
             "beam_size": 1,
             "temperature": 0.0,
@@ -130,6 +129,8 @@ class WhisperRecognizer:
             "no_speech_threshold": 0.6,
             "hallucination_silence_threshold": 0.5,
         }
+        if language and language != "mix":
+            options["language"] = language
         if hotwords and self._supports_hotwords:
             options["hotwords"] = hotwords
         segments, _info = self.model.transcribe(audio, **options)
@@ -272,13 +273,21 @@ def _load_google_credentials(path: str, project: str):
     return creds
 
 
+def speech_language_codes(language: str) -> list[str]:
+    """Chirp picks the dominant language of a clip. Mixed stays inside Indonesian and English."""
+    if language == "id":
+        return ["id-ID"]
+    if language == "mix":
+        return ["id-ID", "en-US"]
+    return ["en-US"]
+
+
 def chirp_request(pcm: bytes, language: str, hotwords: str | None, word_times: bool = False) -> dict:
     """Speech-to-Text V2 body for one Chirp 3 clip.
 
     Word timestamps and phrase hints together make Chirp return "not found",
     so hints win. The pipeline estimates timing when the response has no words.
     """
-    language_code = "id-ID" if language == "id" else "en-US"
     features: dict = {"enableAutomaticPunctuation": True}
     if word_times:
         features["enableWordTimeOffsets"] = True
@@ -288,7 +297,7 @@ def chirp_request(pcm: bytes, language: str, hotwords: str | None, word_times: b
             "sampleRateHertz": SAMPLE_RATE,
             "audioChannelCount": 1,
         },
-        "languageCodes": [language_code],
+        "languageCodes": speech_language_codes(language),
         "model": "chirp_3",
         "features": features,
     }
@@ -393,20 +402,22 @@ class GoogleRecognizer:
         return Transcript(_words_from_google(response.json(), duration))
 
     def _transcribe_v1(self, samples, pcm: bytes, language: str, hotwords: str | None) -> Transcript:
-        language_code = "id-ID" if language == "id" else "en-US"
+        codes = speech_language_codes(language)
         model = self.model if self.model and not self.model.startswith("chirp") else "latest_long"
         phrases = speech_phrases(hotwords)
         payload = {
             "config": {
                 "encoding": "LINEAR16",
                 "sampleRateHertz": SAMPLE_RATE,
-                "languageCode": language_code,
+                "languageCode": codes[0],
                 "model": model,
                 "enableWordTimeOffsets": True,
                 "enableAutomaticPunctuation": True,
             },
             "audio": {"content": base64.b64encode(pcm).decode("ascii")},
         }
+        if len(codes) > 1:
+            payload["config"]["alternativeLanguageCodes"] = codes[1:]
         if phrases:
             payload["config"]["speechContexts"] = [{"phrases": phrases[:40], "boost": 12}]
         with self._lock:

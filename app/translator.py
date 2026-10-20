@@ -33,8 +33,14 @@ Keep every token that looks like [[T0]] exactly as written.
 Output only the translation, with no label and no quotes.
 When the target language is Bahasa Indonesia, use natural formal worship Indonesian.
 Address people as Anda, never kamu or slang.
-When a phrase is already in the target language, or is in a third language, leave it as spoken.
+When a phrase is already in the target language, leave it as spoken. A third language stays only when the source is a single language.
+When the source is mixed English and Bahasa Indonesia, rewrite every clause into the target language. Do not leave the other language, except a name you were told to keep.
 """
+
+
+SPEAKER_LANGUAGES = frozenset({"en", "id", "mix"})
+SPEAKER_LANGUAGE_ERROR = "Speaker language must be English, Bahasa Indonesia, or Mixed."
+CAPTION_LANGUAGE_ERROR = "Listeners read English or Bahasa Indonesia."
 
 
 @dataclass
@@ -44,14 +50,32 @@ class TranslationRequest:
     glossary: Glossary
     context: list[tuple[str, str]]
     session_context: str = ""
+    chosen_language: str = ""
 
 
-def target_language(source_language: str) -> str:
-    return "id" if source_language == "en" else "en"
+def target_language(source_language: str, chosen: str | None = None) -> str:
+    """English and Indonesian stay a pair. Mixed uses the language the operator chose."""
+    if source_language == "en":
+        return "id"
+    if source_language == "id":
+        return "en"
+    if source_language == "mix":
+        return chosen if chosen in {"en", "id"} else "id"
+    return "en"
 
 
 def language_name(language: str) -> str:
-    return "English" if language == "en" else "Bahasa Indonesia"
+    if language == "en":
+        return "English"
+    if language == "mix":
+        return "mixed English and Bahasa Indonesia"
+    return "Bahasa Indonesia"
+
+
+def caption_label(language: str) -> str:
+    if language == "mix":
+        return "Mixed"
+    return language_name(language)
 
 
 def interpreter_background(document: dict) -> str:
@@ -69,7 +93,7 @@ def interpreter_background(document: dict) -> str:
 
 
 def build_user_message(request: TranslationRequest, protected_text: str) -> str:
-    target = target_language(request.source_language)
+    target = target_language(request.source_language, request.chosen_language)
     if request.context:
         rows = []
         for original, translation in request.context[-5:]:
@@ -112,7 +136,7 @@ class GlossaryTranslator:
     async def translate(self, request: TranslationRequest) -> tuple[str, list[str]]:
         if not request.text.strip():
             return "", []
-        protection = request.glossary.protect(request.text, request.source_language)
+        protection = request.glossary.protect(request.text, request.source_language, request.chosen_language)
         return request.glossary.restore(protection.text, protection)
 
 
@@ -155,7 +179,7 @@ class VllmTranslator:
     async def translate(self, request: TranslationRequest) -> tuple[str, list[str]]:
         if not request.text.strip():
             return "", []
-        protection = request.glossary.protect(request.text, request.source_language)
+        protection = request.glossary.protect(request.text, request.source_language, request.chosen_language)
         payload = {
             "model": self.model,
             "temperature": 0,
@@ -197,7 +221,7 @@ class GeminiTranslator:
     async def translate(self, request: TranslationRequest) -> tuple[str, list[str]]:
         if not request.text.strip():
             return "", []
-        protection = request.glossary.protect(request.text, request.source_language)
+        protection = request.glossary.protect(request.text, request.source_language, request.chosen_language)
         payload = {
             "systemInstruction": {"parts": [{"text": SYSTEM_PROMPT}]},
             "contents": [{"role": "user", "parts": [{"text": build_user_message(request, protection.text)}]}],

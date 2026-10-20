@@ -1,5 +1,5 @@
 (function () {
-  const LANGUAGES = { en: "English", id: "Bahasa Indonesia" };
+  const LANGUAGES = { en: "English", id: "Bahasa Indonesia", mix: "Mixed" };
   const STATUS = { ready: "Ready", live: "Live", paused: "Paused", ended: "Ended" };
 
   function el(tag, attrs, ...children) {
@@ -164,8 +164,14 @@
     return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
   }
 
-  function languagePair(speaker) {
-    const target = speaker === "en" ? "id" : "en";
+  function captionLanguage(speaker, chosen) {
+    if (speaker === "en") return "id";
+    if (speaker === "id") return "en";
+    return chosen === "en" ? "en" : "id";
+  }
+
+  function languagePair(speaker, chosen) {
+    const target = captionLanguage(speaker, chosen);
     return `${LANGUAGES[speaker] || speaker} → ${LANGUAGES[target]}`;
   }
 
@@ -182,6 +188,59 @@
     }
   }
 
+  function hear() {
+    let context = null;
+    let next = 0;
+    let enabled = true;
+    const sources = [];
+
+    function ready() {
+      if (!enabled) return null;
+      if (!context) context = new AudioContext();
+      if (context.state === "suspended") context.resume();
+      return context;
+    }
+
+    function stop() {
+      sources.splice(0).forEach((source) => {
+        try { source.stop(); } catch (err) { /* already finished */ }
+      });
+      next = 0;
+    }
+
+    function play(bytes) {
+      const audio = ready();
+      if (!audio || !(bytes instanceof ArrayBuffer) || bytes.byteLength < 2) return;
+      const view = new Int16Array(bytes);
+      const buffer = audio.createBuffer(1, view.length, 16000);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < view.length; i += 1) channel[i] = view[i] / 32768;
+      const source = audio.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audio.destination);
+      const now = audio.currentTime;
+      if (next < now + 0.02) next = now + 0.08;
+      source.start(next);
+      next += buffer.duration;
+      sources.push(source);
+      source.onended = () => {
+        const index = sources.indexOf(source);
+        if (index >= 0) sources.splice(index, 1);
+      };
+    }
+
+    return {
+      play,
+      stop,
+      unlock: ready,
+      setEnabled(value) {
+        enabled = Boolean(value);
+        if (!enabled) stop();
+        else ready();
+      }
+    };
+  }
+
   function password(length = 14) {
     const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
     const values = crypto.getRandomValues(new Uint32Array(length));
@@ -190,6 +249,6 @@
 
   window.UI = {
     LANGUAGES, el, api, toast, busy, session, header, dialog, confirmAction,
-    statusBadge, setBadge, parseDay, formatDate, today, languagePair, lines, copy, password
+    statusBadge, setBadge, parseDay, formatDate, today, captionLanguage, languagePair, lines, copy, hear, password
   };
 })();

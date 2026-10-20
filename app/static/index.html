@@ -49,6 +49,14 @@
           <div class="segmented block" role="radiogroup" aria-labelledby="language-label">
             <label><input type="radio" name="language" value="en" checked><span>English</span></label>
             <label><input type="radio" name="language" value="id"><span>Bahasa Indonesia</span></label>
+            <label><input type="radio" name="language" value="mix"><span>Mixed</span></label>
+          </div>
+          <div class="field" id="caption-field" hidden>
+            <span class="label" id="caption-label">Listeners read</span>
+            <div class="segmented block" role="radiogroup" aria-labelledby="caption-label">
+              <label><input type="radio" name="caption" value="id" checked><span>Bahasa Indonesia</span></label>
+              <label><input type="radio" name="caption" value="en"><span>English</span></label>
+            </div>
           </div>
           <p class="hint" id="language-hint">Listeners read Bahasa Indonesia.</p>
         </div>
@@ -89,14 +97,22 @@
       return document.querySelector("input[name=language]:checked").value;
     }
 
+    function captionChoice() {
+      const selected = document.querySelector("input[name=caption]:checked");
+      return selected ? selected.value : "id";
+    }
+
     function showLanguageHint() {
+      const speaker = language();
+      document.querySelector("#caption-field").hidden = speaker !== "mix";
+      const caption = UI.captionLanguage(speaker, captionChoice());
       document.querySelector("#language-hint").textContent =
-        language() === "en" ? "Listeners read Bahasa Indonesia." : "Listeners read English.";
+        caption === "en" ? "Listeners read English." : "Listeners read Bahasa Indonesia.";
     }
 
     function row(service) {
       const date = UI.parseDay(service.service_date) || UI.parseDay(service.created_at);
-      const meta = [UI.languagePair(service.speaker_language)];
+      const meta = [UI.languagePair(service.speaker_language, service.translation_language)];
       if (service.service_date) meta.unshift(UI.formatDate(service.service_date));
       else meta.unshift(`Created ${UI.formatDate(service.created_at)}`);
       if (service.tts_enabled) meta.push("Spoken translation");
@@ -140,6 +156,8 @@
       document.querySelector("#date").value = UI.today();
       const speaker = (profile && profile.speaker_language) || "en";
       document.querySelector(`input[name=language][value="${speaker}"]`).checked = true;
+      const caption = (profile && profile.translation_language) || "id";
+      document.querySelector(`input[name=caption][value="${caption === "en" ? "en" : "id"}"]`).checked = true;
       document.querySelector("#voice").checked = Boolean(profile && profile.tts_enabled);
       note.value = SERVICE_NOTE;
       showLanguageHint();
@@ -149,7 +167,7 @@
 
     document.querySelector("#new-service").addEventListener("click", openCreate);
     document.querySelector("#cancel").addEventListener("click", () => createDialog.close());
-    for (const input of document.querySelectorAll("input[name=language]")) {
+    for (const input of document.querySelectorAll("input[name=language], input[name=caption]")) {
       input.addEventListener("change", showLanguageHint);
     }
 
@@ -170,6 +188,7 @@
             name,
             service_date: document.querySelector("#date").value,
             speaker_language: language(),
+            translation_language: captionChoice(),
             tts_enabled: document.querySelector("#voice").checked,
             note: note.value.trim() === SERVICE_NOTE.trim() ? "" : note.value
           },

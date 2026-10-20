@@ -32,6 +32,7 @@
   <main class="captions" id="captions" data-size="3"></main>
   <button type="button" id="jump" hidden>↓ Back to live</button>
   <script src="/static/captions.js"></script>
+  <script src="/static/ui.js"></script>
   <script>
     const sessionId = location.pathname.split("/").filter(Boolean).pop();
     const captions = document.querySelector("#captions");
@@ -40,6 +41,7 @@
     const statusBadge = document.querySelector("#status");
     const STATUS = { live: ["badge-live", "Live"], paused: ["badge-paused", "Paused"], ended: ["badge-ended", "Ended"], ready: ["badge-ready", "Waiting"] };
     let speaker = "en";
+    let translationLanguage = "id";
     let display = localStorage.getItem("voiceofgod-language") || "translated";
     let size = Number(localStorage.getItem("voiceofgod-size") || "3");
     let snapshot = null;
@@ -82,14 +84,27 @@
     }
 
     function markLanguages() {
-      const englishIsOriginal = speaker === "en";
-      document.querySelector("#show-en").classList.toggle("active", (display === "original") === englishIsOriginal);
-      document.querySelector("#show-id").classList.toggle("active", (display === "original") !== englishIsOriginal);
-      document.querySelector("#show-en").setAttribute("aria-pressed", document.querySelector("#show-en").classList.contains("active") ? "true" : "false");
-      document.querySelector("#show-id").setAttribute("aria-pressed", document.querySelector("#show-id").classList.contains("active") ? "true" : "false");
-      const english = (display === "original") === englishIsOriginal;
-      title.textContent = english ? "English" : "Bahasa Indonesia";
-      document.documentElement.lang = english ? "en" : "id";
+      const showHeard = document.querySelector("#show-en");
+      const showTranslation = document.querySelector("#show-id");
+      const target = UI.captionLanguage(speaker, translationLanguage);
+      if (speaker === "mix") {
+        showHeard.textContent = "Mixed";
+        showTranslation.textContent = target === "en" ? "English" : "Indonesia";
+        showHeard.classList.toggle("active", display === "original");
+        showTranslation.classList.toggle("active", display !== "original");
+      } else {
+        const englishIsOriginal = speaker === "en";
+        showHeard.textContent = "English";
+        showTranslation.textContent = "Indonesia";
+        showHeard.classList.toggle("active", (display === "original") === englishIsOriginal);
+        showTranslation.classList.toggle("active", (display === "original") !== englishIsOriginal);
+      }
+      showHeard.setAttribute("aria-pressed", showHeard.classList.contains("active") ? "true" : "false");
+      showTranslation.setAttribute("aria-pressed", showTranslation.classList.contains("active") ? "true" : "false");
+      const showingHeard = display === "original";
+      const showingEnglish = speaker === "mix" ? (!showingHeard && target === "en") : ((showingHeard) === (speaker === "en"));
+      title.textContent = speaker === "mix" && showingHeard ? "Mixed" : (showingEnglish ? "English" : "Bahasa Indonesia");
+      document.documentElement.lang = showingEnglish ? "en" : "id";
     }
 
     function remember(event) {
@@ -137,6 +152,7 @@
     function paint(next) {
       snapshot = next;
       speaker = next.speaker_language || speaker;
+      translationLanguage = next.translation_language || translationLanguage;
       applyVoice(next.voice);
       remember(next);
       describe(next);
@@ -182,6 +198,7 @@
         }
         if (event.type === "resume") {
           speaker = event.speaker_language || speaker;
+          translationLanguage = event.translation_language || translationLanguage;
           mergeLines(event.lines);
           if (snapshot) {
             snapshot.provisional = event.provisional || null;
@@ -198,7 +215,9 @@
         snapshot.status = event.status || snapshot.status;
         snapshot.banner = event.banner || "";
         snapshot.speaker_language = event.speaker_language || snapshot.speaker_language;
+        snapshot.translation_language = event.translation_language || snapshot.translation_language;
         speaker = snapshot.speaker_language || speaker;
+        translationLanguage = snapshot.translation_language || translationLanguage;
         if (event.line && event.line.state === "final") mergeLines([event.line]);
         snapshot.provisional = event.provisional || null;
         setStatus(snapshot.status);
@@ -215,7 +234,7 @@
     }
 
     document.querySelector("#show-en").addEventListener("click", () => {
-      display = speaker === "en" ? "original" : "translation";
+      display = speaker === "mix" || speaker === "en" ? "original" : "translation";
       localStorage.setItem("voiceofgod-language", display);
       markLanguages();
       if (snapshot) view.refresh(snapshot);

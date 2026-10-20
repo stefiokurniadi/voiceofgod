@@ -54,8 +54,8 @@ class GoogleSpeaker:
         return b"".join(parts)
 
 
-def voice_language(speaker_language: str) -> str:
-    return target_language(speaker_language)
+def voice_language(speaker_language: str, chosen: str | None = None) -> str:
+    return target_language(speaker_language, chosen)
 
 
 def _chunks(text: str, limit: int) -> list[str]:

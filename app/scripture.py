@@ -156,17 +156,25 @@ def looks_like_commentary(text: str) -> bool:
     return COMMENTARY_RE.search(text) is not None
 
 
-def reading_status(citation: Citation | None, speaker_language: str) -> tuple[str, str, str | None, str | None]:
+def reading_status(
+    citation: Citation | None,
+    speaker_language: str,
+    caption_language: str | None = None,
+) -> tuple[str, str, str | None, str | None]:
     """Listener original, listener translation, reference_en, reference_id."""
+    from app.translator import target_language
+
     reference_en = citation.display_en if citation else None
     reference_id = citation.display_id if citation else None
+    english = f"{reference_en} — Scripture is being read" if reference_en else "Scripture is being read"
+    indonesian = f"{reference_id} — Firman sedang dibacakan" if reference_id else "Firman sedang dibacakan"
     if speaker_language == "en":
-        original = f"{reference_en} — Scripture is being read" if reference_en else "Scripture is being read"
-        translation = f"{reference_id} — Firman sedang dibacakan" if reference_id else "Firman sedang dibacakan"
-    else:
-        original = f"{reference_id} — Firman sedang dibacakan" if reference_id else "Firman sedang dibacakan"
-        translation = f"{reference_en} — Scripture is being read" if reference_en else "Scripture is being read"
-    return original, translation, reference_en, reference_id
+        return english, indonesian, reference_en, reference_id
+    if speaker_language == "id":
+        return indonesian, english, reference_en, reference_id
+    heard = " · ".join(part for part in (english, indonesian) if part)
+    translation = english if target_language(speaker_language, caption_language) == "en" else indonesian
+    return heard, translation, reference_en, reference_id
 
 
 def _prefix_number(raw: str | None) -> int | None:

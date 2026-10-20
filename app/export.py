@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 
-def render_txt(lines: list[dict], speaker_language: str) -> str:
-    source = "English" if speaker_language == "en" else "Bahasa Indonesia"
-    target = "Bahasa Indonesia" if speaker_language == "en" else "English"
+def render_txt(lines: list[dict], speaker_language: str, translation_language: str | None = None) -> str:
+    from app.translator import caption_label, target_language
+
+    source = caption_label(speaker_language)
+    target = caption_label(target_language(speaker_language, translation_language))
     blocks: list[str] = []
     for line in _finals(lines):
         blocks.append(

@@ -46,9 +46,28 @@
             <select id="source">
               <option value="browser">This computer's microphone</option>
               <option value="rtmp">OBS stream (RTMP)</option>
+              <option value="youtube" hidden>YouTube video</option>
             </select>
-            <p class="hint">Change the source while the service is not running.</p>
+            <p class="hint" id="source-hint">Change the source while the service is not running.</p>
           </div>
+          <section id="youtube-box" hidden>
+            <p class="alert info">This test plays a YouTube video into the captions. The microphone stays off. Release the slider to continue from that time.</p>
+            <div class="field">
+              <label class="switch">
+                <input type="checkbox" id="youtube-hear" role="switch" checked>
+                <span class="switch-track" aria-hidden="true"></span>
+                <span class="switch-text">
+                  <strong>Play the video sound</strong>
+                  <small>Turn this off if another tab is already playing it.</small>
+                </span>
+              </label>
+            </div>
+            <div class="field">
+              <label for="youtube-range">Position</label>
+              <input id="youtube-range" type="range" min="0" max="1" step="1" value="0">
+              <p class="hint" id="youtube-clock">0:00</p>
+            </div>
+          </section>
           <section id="rtmp-box" hidden>
             <p class="alert info">RTMP adds a little delay. Send the pulpit or speech mix, not the full program with music and videos.</p>
             <div class="field">
@@ -74,6 +93,14 @@
             <select id="language">
               <option value="en">English</option>
               <option value="id">Bahasa Indonesia</option>
+              <option value="mix">Mixed</option>
+            </select>
+          </div>
+          <div class="field" id="translation-field" hidden>
+            <label for="translation-language">Listeners read</label>
+            <select id="translation-language">
+              <option value="id">Bahasa Indonesia</option>
+              <option value="en">English</option>
             </select>
           </div>
           <div class="field">
@@ -235,6 +262,7 @@
     let outputFilled = false;
     let inputMode = "browser";
     let rtmpLevels = [];
+    let youtubeDrag = false;
 
     const originalView = CaptionView(document.querySelector("#original"), {
       fieldOf: () => "full_original",
@@ -331,25 +359,37 @@
       banner.textContent = status === "ended" ? "This service has ended. Press Start to continue it." : (text || "");
     }
 
-    function setLanguage(speaker) {
-      document.querySelector("#language").value = speaker;
-      const names = UI.LANGUAGES;
-      document.querySelector("#original-lang").textContent = names[speaker] || "";
-      document.querySelector("#translation-lang").textContent = names[speaker === "en" ? "id" : "en"];
+    function setLanguage(speaker, caption) {
+      const source = speaker || "en";
+      const target = UI.captionLanguage(source, caption);
+      document.querySelector("#language").value = source;
+      document.querySelector("#translation-language").value = target;
+      document.querySelector("#translation-field").hidden = source !== "mix";
+      document.querySelector("#original-lang").textContent = UI.LANGUAGES[source] || "";
+      document.querySelector("#translation-lang").textContent = UI.LANGUAGES[target] || "";
       const parts = [];
       if (snapshot.church_name) parts.push(snapshot.church_name);
-      parts.push(UI.languagePair(speaker));
+      parts.push(UI.languagePair(source, caption));
       document.querySelector("#service-sub").textContent = parts.join(" · ");
     }
 
+    function externalAudio() {
+      return inputMode === "rtmp" || inputMode === "youtube";
+    }
+
     function setSourceLocked(status) {
-      document.querySelector("#source").disabled = status === "live" || status === "paused";
+      document.querySelector("#source").disabled = inputMode === "youtube" || status === "live" || status === "paused";
     }
 
     function showSource() {
       const rtmp = inputMode === "rtmp";
       document.querySelector("#rtmp-box").hidden = !rtmp;
-      document.querySelector("#wave").setAttribute("aria-label", rtmp ? "OBS audio level" : "Microphone waveform");
+      document.querySelector("#youtube-box").hidden = inputMode !== "youtube";
+      document.querySelector("#source option[value=youtube]").hidden = inputMode !== "youtube";
+      document.querySelector("#source-hint").textContent = inputMode === "youtube"
+        ? "This test plays the YouTube video. The microphone stays off."
+        : "Change the source while the service is not running.";
+      document.querySelector("#wave").setAttribute("aria-label", externalAudio() ? "Incoming audio level" : "Microphone waveform");
     }
 
     function fillOutput(next) {
@@ -388,11 +428,11 @@
       }
       ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
       ctx.clearRect(0, 0, width, height);
-      const audible = inputMode === "rtmp" ? snapshot.status === "live" : Boolean(stream);
+      const audible = externalAudio() ? snapshot.status === "live" : Boolean(stream);
       ctx.strokeStyle = audible ? "#f2b84b" : "#4a4a52";
       ctx.lineWidth = 1.6;
       ctx.beginPath();
-      if (inputMode === "rtmp") {
+      if (externalAudio()) {
         if (!rtmpLevels.length) {
           ctx.moveTo(0, height / 2);
           ctx.lineTo(width, height / 2);
@@ -500,12 +540,12 @@
       setStatus(next.status);
       setBanner(next.status, next.banner);
       showMetrics(next.metrics);
-      setLanguage(next.speaker_language || "en");
+      setLanguage(next.speaker_language || "en", next.translation_language);
       document.querySelector("#voice").checked = Boolean(next.voice);
       fillGlossary(next.glossary);
       fillOutput(next);
       setSourceLocked(next.status);
-      setRunning(next.status === "live" && (inputMode === "rtmp" || Boolean(stream)));
+      setRunning(next.status === "live" && (externalAudio() || Boolean(stream)));
       const rendered = withOperatorText(next);
       if (mode === "resume") {
         originalView.applyResume(rendered.lines, rendered.provisional);
@@ -561,8 +601,13 @@
       if (lastLineId) query.set("after", lastLineId);
       if (lastSeq) query.set("since", String(lastSeq));
       socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/operate/${sessionId}?${query}`);
+      socket.binaryType = "arraybuffer";
       socket.onopen = () => { if (error.textContent.startsWith("Connection lost")) error.textContent = ""; };
       socket.onmessage = (message) => {
+        if (message.data instanceof ArrayBuffer) {
+          player.play(message.data);
+          return;
+        }
         const event = JSON.parse(message.data);
         remember(event);
         if (event.type === "deleted" || event.type === "unauthorized") {
@@ -580,10 +625,12 @@
           snapshot = { ...snapshot, status: event.status, banner: event.banner || "" };
           setStatus(event.status);
           setSourceLocked(event.status);
-          setRunning(event.status === "live" && (inputMode === "rtmp" || Boolean(stream)));
+          setRunning(event.status === "live" && (externalAudio() || Boolean(stream)));
         }
-        if (event.speaker_language && event.speaker_language !== document.querySelector("#language").value) {
-          setLanguage(event.speaker_language);
+        if (event.speaker_language) {
+          const speakerChanged = event.speaker_language !== document.querySelector("#language").value;
+          const captionChanged = event.translation_language && event.translation_language !== document.querySelector("#translation-language").value;
+          if (speakerChanged || captionChanged) setLanguage(event.speaker_language, event.translation_language);
         }
         if ("voice" in event) document.querySelector("#voice").checked = Boolean(event.voice);
         setBanner(event.status, event.banner);
@@ -626,7 +673,7 @@
 
     startButton.addEventListener("click", async () => {
       if (starting || stream) return;
-      if (inputMode === "rtmp" && snapshot.status === "live") return;
+      if (externalAudio() && snapshot.status === "live") return;
       starting = true;
       error.textContent = "";
       UI.busy(startButton, true, "Starting");
@@ -640,10 +687,10 @@
           return;
         }
         UI.busy(startButton, false);
-        if (inputMode === "rtmp") {
+        if (externalAudio()) {
           setRunning(true);
           setSourceLocked("live");
-          if (snapshot.rtmp && snapshot.rtmp.available === false) {
+          if (inputMode === "rtmp" && snapshot.rtmp && snapshot.rtmp.available === false) {
             UI.toast("OBS ingest is not set up on this server.", "error");
           }
           return;
@@ -704,6 +751,10 @@
 
     document.querySelector("#source").addEventListener("change", async (event) => {
       const next = event.target.value;
+      if (next === "youtube") {
+        event.target.value = inputMode;
+        return;
+      }
       const response = await fetch(`/api/sessions/${sessionId}/input`, {
         method: "PUT",
         headers,
@@ -758,20 +809,25 @@
       }
     });
 
-    document.querySelector("#language").addEventListener("change", async (event) => {
-      const next = event.target.value;
+    async function saveLanguage() {
+      const next = document.querySelector("#language").value;
+      const caption = document.querySelector("#translation-language").value;
+      document.querySelector("#translation-field").hidden = next !== "mix";
       const response = await fetch(`/api/sessions/${sessionId}/language`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ speaker_language: next })
+        body: JSON.stringify({ speaker_language: next, translation_language: caption })
       });
       if (!response.ok) {
         UI.toast("Could not change the language.", "error");
         return;
       }
-      setLanguage(next);
-      UI.toast(`Now translating ${UI.languagePair(next)}`, "success");
-    });
+      setLanguage(next, caption);
+      UI.toast(`Now translating ${UI.languagePair(next, caption)}`, "success");
+    }
+
+    document.querySelector("#language").addEventListener("change", saveLanguage);
+    document.querySelector("#translation-language").addEventListener("change", saveLanguage);
 
     document.querySelector("#voice").addEventListener("change", async (event) => {
       const enabled = event.target.checked;
@@ -833,15 +889,56 @@
       }
     });
 
+    function clock(seconds) {
+      const whole = Math.max(0, Math.floor(Number(seconds) || 0));
+      return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+    }
+
+    function paintYoutube(body) {
+      const range = document.querySelector("#youtube-range");
+      const duration = Number(body.duration) || 0;
+      const position = Number(body.position) || 0;
+      const live = Boolean(body.live);
+      range.disabled = live;
+      if (duration > 0) range.max = String(Math.floor(duration));
+      if (!youtubeDrag) range.value = String(Math.min(Math.floor(position), Number(range.max) || 0));
+      document.querySelector("#youtube-clock").textContent = live ? "Live stream" : `${clock(position)}${duration ? ` / ${clock(duration)}` : ""}`;
+    }
+
+    const player = UI.hear();
+    const youtubeHear = document.querySelector("#youtube-hear");
+    youtubeHear.addEventListener("change", () => player.setEnabled(youtubeHear.checked));
+    document.addEventListener("pointerdown", () => { if (youtubeHear.checked) player.unlock(); });
+
+    const youtubeRange = document.querySelector("#youtube-range");
+    youtubeRange.addEventListener("pointerdown", () => { youtubeDrag = true; });
+    youtubeRange.addEventListener("pointerup", () => { youtubeDrag = false; });
+    youtubeRange.addEventListener("change", async () => {
+      youtubeDrag = false;
+      player.stop();
+      const response = await fetch(`/api/sessions/${sessionId}/youtube/seek`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ seconds: Number(youtubeRange.value) })
+      });
+      const body = await response.json();
+      if (!response.ok) {
+        UI.toast(body.detail || "Could not move the video.", "error");
+        return;
+      }
+      paintYoutube(body);
+    });
+
     restWave();
     watchWave();
     setInterval(async () => {
-      if (stopped || inputMode !== "rtmp") return;
+      if (stopped || !externalAudio()) return;
       const response = await fetch(`/api/sessions/${sessionId}/level`, { headers });
       if (!response.ok) return;
       const body = await response.json();
       rtmpLevels.push(Number(body.level) || 0);
       if (rtmpLevels.length > 80) rtmpLevels.shift();
+      if (inputMode === "youtube") paintYoutube(body);
     }, 100);
     load().then(() => {
       if (stopped) return;

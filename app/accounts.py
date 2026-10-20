@@ -100,12 +100,13 @@ def _public_user(row) -> dict:
         "church_note": row["church_note"] or "" if "church_note" in row else "",
         "keep_names": list(keep),
         "speaker_language": row["speaker_language"],
+        "translation_language": row["translation_language"] if "translation_language" in row else "id",
         "tts_enabled": bool(row["tts_enabled"]),
     }
 
 
 _USER_SQL = """
-    SELECT u.id, u.username, u.role, u.disabled, u.church_id, u.speaker_language, u.tts_enabled,
+    SELECT u.id, u.username, u.role, u.disabled, u.church_id, u.speaker_language, u.translation_language, u.tts_enabled,
            c.name AS church_name, c.note AS church_note, c.keep_names
     FROM users u
     LEFT JOIN churches c ON c.id = u.church_id
@@ -287,14 +288,25 @@ class Accounts:
             await self.db.execute("UPDATE users SET church_id = $2 WHERE id = $1", user_id, church_id)
         return await self.user_by_id(user_id)
 
-    async def save_preferences(self, user_id: str, speaker_language: str, tts_enabled: bool) -> dict:
-        if speaker_language not in {"en", "id"}:
-            raise ValueError("Speaker language must be English or Bahasa Indonesia.")
+    async def save_preferences(
+        self,
+        user_id: str,
+        speaker_language: str,
+        tts_enabled: bool,
+        translation_language: str = "id",
+    ) -> dict:
+        from app.translator import SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR
+
+        if speaker_language not in SPEAKER_LANGUAGES:
+            raise ValueError(SPEAKER_LANGUAGE_ERROR)
+        if translation_language not in {"en", "id"}:
+            raise ValueError("Listeners read English or Bahasa Indonesia.")
         await self.db.execute(
-            "UPDATE users SET speaker_language = $2, tts_enabled = $3 WHERE id = $1",
+            "UPDATE users SET speaker_language = $2, tts_enabled = $3, translation_language = $4 WHERE id = $1",
             user_id,
             speaker_language,
             bool(tts_enabled),
+            translation_language,
         )
         return await self.user_by_id(user_id)
 
@@ -309,13 +321,15 @@ class Accounts:
         voice: bool,
         token_hash: str,
         document: dict,
+        translation_language: str = "id",
     ) -> None:
         await self.db.execute(
             """
             INSERT INTO services (
-                id, church_id, name, note, service_date, speaker_language, voice, token_hash, document, status
+                id, church_id, name, note, service_date, speaker_language, translation_language,
+                voice, token_hash, document, status
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             """,
             service_id,
             church_id,
@@ -323,6 +337,7 @@ class Accounts:
             note,
             service_date,
             speaker_language,
+            translation_language if translation_language in {"en", "id"} else "id",
             voice,
             token_hash,
             document,
@@ -330,17 +345,21 @@ class Accounts:
         )
 
     async def save_document(self, service_id: str, document: dict) -> None:
+        from app.translator import target_language
+
+        speaker = document.get("speaker_language") or "en"
         await self.db.execute(
             """
             UPDATE services
-            SET document = $2, status = $3, speaker_language = $4, voice = $5
+            SET document = $2, status = $3, speaker_language = $4, voice = $5, translation_language = $6
             WHERE id = $1
             """,
             service_id,
             document,
             document.get("status") or "ready",
-            document.get("speaker_language") or "en",
+            speaker,
             bool(document.get("voice")),
+            target_language(speaker, document.get("translation_language")),
         )
 
     async def load_service(self, service_id: str):
@@ -356,23 +375,27 @@ class Accounts:
     async def list_services(self, church_id: str) -> list[dict]:
         rows = await self.db.fetch(
             """
-            SELECT id, name, note, service_date, speaker_language, voice, status, created_at
+            SELECT id, name, note, service_date, speaker_language, translation_language, voice, status, created_at
             FROM services
             WHERE church_id = $1 AND status <> 'deleted'
             ORDER BY created_at DESC
             """,
             church_id,
         )
+        from app.translator import target_language
+
         listed = []
         for row in rows:
             service_date = row["service_date"]
+            speaker = row["speaker_language"]
             listed.append(
                 {
                     "id": row["id"],
                     "name": row["name"],
                     "note": row["note"],
                     "service_date": service_date.isoformat() if service_date else "",
-                    "speaker_language": row["speaker_language"],
+                    "speaker_language": speaker,
+                    "translation_language": target_language(speaker, row["translation_language"]),
                     "tts_enabled": bool(row["voice"]),
                     "status": row["status"],
                     "created_at": row["created_at"].isoformat(),

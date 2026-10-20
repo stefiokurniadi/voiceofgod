@@ -11,6 +11,8 @@ import secrets
 from app.pipeline import PipelineConfig, SessionPipeline
 from app.propresenter import Stage, validate_propresenter
 from app.rtmp import UNAVAILABLE, RtmpIngest, rtmp_ready
+from app.youtube import UNAVAILABLE as YOUTUBE_UNAVAILABLE
+from app.youtube import YouTubeIngest, check_youtube_url, youtube_ready
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,8 @@ class Director:
         self.pipelines: dict[str, SessionPipeline] = {}
         self.listeners: dict[str, int] = defaultdict(int)
         self.ingest = RtmpIngest(settings, self)
+        self.youtube = YouTubeIngest(self)
+        self.youtube_secrets: dict[str, str] = {}
         self.stage = Stage(self)
 
     async def create_session(
@@ -51,11 +55,17 @@ class Director:
         base_url: str,
         do_not_translate: list[str] | None = None,
         terms: list[dict] | None = None,
+        translation_language: str | None = None,
     ) -> dict:
+        from app.translator import CAPTION_LANGUAGE_ERROR, SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR, target_language
+
         if not user.get("church_id"):
             raise PermissionError("Set the church before creating a service.")
-        if speaker_language not in {"en", "id"}:
-            raise ValueError("Speaker language must be English or Bahasa Indonesia.")
+        if speaker_language not in SPEAKER_LANGUAGES:
+            raise ValueError(SPEAKER_LANGUAGE_ERROR)
+        if speaker_language == "mix" and translation_language not in (None, "", "en", "id"):
+            raise ValueError(CAPTION_LANGUAGE_ERROR)
+        caption = target_language(speaker_language, translation_language or user.get("translation_language"))
         cleaned_name = (name or "").strip() or "Service"
         if len(cleaned_name) > 120:
             raise ValueError("The service name is too long.")
@@ -78,6 +88,7 @@ class Director:
         document = {
             "id": session_id,
             "speaker_language": speaker_language,
+            "translation_language": caption,
             "status": "ready",
             "banner": "",
             "seq": 0,
@@ -117,6 +128,7 @@ class Director:
                 bool(voice),
                 document["token_hash"],
                 document,
+                caption,
             )
         logger.info("session %s created", session_id)
         return {
@@ -126,6 +138,7 @@ class Director:
             "operator_url": f"{base_url}/o/{session_id}?k={secret}",
             "listener_url": f"{base_url}/l/{session_id}",
             "speaker_language": speaker_language,
+            "translation_language": caption,
         }
 
     def _bind(self, document: dict, glossary=None):
@@ -208,9 +221,15 @@ class Director:
         pipeline = self.pipelines.get(session_id)
         if pipeline is None:
             raise KeyError(session_id)
-        if pipeline.started and pipeline.doc.get("status") != "ended":
+        already = pipeline.started and pipeline.doc.get("status") != "ended"
+        youtube_resume = (
+            already
+            and pipeline.doc.get("input") == "youtube"
+            and not self.youtube.running(session_id)
+        )
+        if already and not youtube_resume:
             return
-        if self.live_count() >= self.settings.max_live_sessions:
+        if not already and self.live_count() >= self.settings.max_live_sessions:
             raise RuntimeError(f"This server is already running {self.settings.max_live_sessions} sessions.")
         await pipeline.start()
         if pipeline.doc.get("input") == "rtmp":
@@ -218,6 +237,11 @@ class Director:
                 await pipeline._set_status("live", UNAVAILABLE)
             else:
                 await self.ingest.start(session_id)
+        if pipeline.doc.get("input") == "youtube":
+            if not youtube_ready() and self.youtube.resolve is None:
+                await pipeline._set_status("live", YOUTUBE_UNAVAILABLE)
+            else:
+                await self.youtube.start(session_id)
         await self.stage.start(session_id)
 
     async def stop(self, session_id: str) -> None:
@@ -225,11 +249,14 @@ class Director:
         if pipeline is None:
             raise KeyError(session_id)
         await self.ingest.stop(session_id)
+        await self.youtube.stop(session_id)
         await pipeline.stop()
         await self.stage.clear_session(session_id)
         await self.stage.stop(session_id)
 
     async def delete(self, session_id: str) -> None:
+        await self.youtube.stop(session_id)
+        self.youtube_secrets.pop(session_id, None)
         await self.ingest.stop(session_id)
         await self.stage.clear_session(session_id)
         await self.stage.stop(session_id)
@@ -266,6 +293,8 @@ class Director:
         pipeline = self.pipelines.get(session_id)
         if pipeline is None:
             raise KeyError(session_id)
+        if pipeline.doc.get("input") == "youtube":
+            raise RuntimeError("A YouTube test keeps its audio source.")
         if pipeline.started and pipeline.doc.get("status") != "ended":
             raise RuntimeError("End the session before changing the audio source.")
         async with pipeline.lock:
@@ -289,7 +318,145 @@ class Director:
 
     async def shutdown(self) -> None:
         await self.ingest.shutdown()
+        await self.youtube.shutdown()
         await self.stage.shutdown()
+
+    def active_youtube(self):
+        for pipeline in self.pipelines.values():
+            if pipeline.doc.get("input") != "youtube":
+                continue
+            if pipeline.started and pipeline.doc.get("status") != "ended":
+                return pipeline
+        return None
+
+    async def create_youtube_test(self, url: str, speaker_language: str, base_url: str) -> dict:
+        page = check_youtube_url(url)
+        from app.translator import SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR, target_language
+
+        if speaker_language not in SPEAKER_LANGUAGES:
+            raise ValueError(SPEAKER_LANGUAGE_ERROR)
+        caption = target_language(speaker_language)
+        if self.active_youtube() is not None:
+            raise RuntimeError("A YouTube test is already running.")
+        if self.live_count() >= self.settings.max_live_sessions:
+            raise RuntimeError(f"This server is already running {self.settings.max_live_sessions} sessions.")
+        self.recognizer.ensure_loaded()
+        translator_ready = await self.translator.healthy()
+        if self.settings.require_translator and not translator_ready:
+            raise RuntimeError("Translator is not ready.")
+        session_id = secrets.token_urlsafe(12)
+        secret = secrets.token_urlsafe(24)
+        glossary = self.glossary.merged([], [])
+        document = {
+            "id": session_id,
+            "speaker_language": speaker_language,
+            "translation_language": caption,
+            "status": "ready",
+            "banner": "",
+            "seq": 0,
+            "lines": [],
+            "provisional": None,
+            "line_counter": 0,
+            "metrics": {"listeners": 0, "stt_ms": None, "translate_ms": None, "lag_ms": None},
+            "token_hash": hash_token(secret),
+            "translator_ready": translator_ready,
+            "development_translator": bool(getattr(self.translator, "development", False)),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "glossary": glossary.to_dict(),
+            "voice": False,
+            "church_id": "",
+            "church_name": "",
+            "church_note": "",
+            "service_name": "YouTube test",
+            "service_note": "",
+            "service_date": "",
+            "input": "youtube",
+            "youtube_url": page,
+            "youtube_offset": 0,
+            "youtube_duration": 0,
+            "youtube_live": False,
+            "ingest_token": "",
+            "propresenter": {"enabled": False, "base_url": "", "message": "", "token": "Translation"},
+        }
+        if document["development_translator"]:
+            document["banner"] = "Development translator is on. These are not real translations."
+        pipeline = self._bind(document, glossary)
+        self.pipelines[session_id] = pipeline
+        self.youtube_secrets[session_id] = secret
+        await self.repository.save(session_id, document)
+        await self.start(session_id)
+        logger.info("youtube test %s created", session_id)
+        return {
+            "id": session_id,
+            "operator_url": f"{base_url}/o/{session_id}?k={secret}",
+            "speaker_language": speaker_language,
+        }
+
+    def youtube_view(self, base_url: str) -> dict:
+        pipeline = self.active_youtube()
+        if pipeline is None:
+            return {"active": False}
+        session_id = pipeline.doc["id"]
+        secret = self.youtube_secrets.get(session_id) or ""
+        view = {
+            "active": True,
+            "id": session_id,
+            "url": pipeline.doc.get("youtube_url") or "",
+            "status": pipeline.doc.get("status") or "",
+            "banner": pipeline.doc.get("banner") or "",
+            **self.youtube_position(pipeline),
+        }
+        if secret:
+            view["operator_url"] = f"{base_url}/o/{session_id}?k={secret}"
+        return view
+
+    def youtube_position(self, pipeline) -> dict:
+        duration = float(pipeline.doc.get("youtube_duration") or 0)
+        offset = float(pipeline.doc.get("youtube_offset") or 0)
+        position = offset + float(getattr(pipeline, "youtube_played", 0) or 0)
+        if duration:
+            position = min(position, duration)
+        return {
+            "position": round(position, 3),
+            "duration": round(duration, 3),
+            "live": bool(pipeline.doc.get("youtube_live")),
+        }
+
+    async def seek_youtube(self, session_id: str, seconds: float) -> dict:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None or pipeline.doc.get("input") != "youtube":
+            raise ValueError("Only a YouTube test can move the playback time.")
+        if pipeline.doc.get("youtube_live"):
+            raise ValueError("A live stream cannot be moved.")
+        try:
+            target = float(seconds)
+        except (TypeError, ValueError):
+            raise ValueError("The time has to be a number of seconds.")
+        if target < 0:
+            raise ValueError("The time has to be zero or later.")
+        duration = float(pipeline.doc.get("youtube_duration") or 0)
+        if duration and target > duration:
+            raise ValueError("That time is past the end of the video.")
+        await self.youtube.stop(session_id)
+        async with pipeline.lock:
+            pipeline.doc["youtube_offset"] = target
+        await pipeline.drop_partial()
+        if pipeline.doc.get("status") == "ended" or not pipeline.started:
+            await self.start(session_id)
+        else:
+            if pipeline.doc.get("status") != "live":
+                await pipeline._set_status("live", pipeline._standing_banner())
+            if not youtube_ready() and self.youtube.resolve is None:
+                await pipeline._set_status("live", YOUTUBE_UNAVAILABLE)
+            else:
+                await self.youtube.start(session_id)
+        return self.youtube_position(pipeline)
+
+    async def stop_youtube_test(self) -> None:
+        pipeline = self.active_youtube()
+        if pipeline is None:
+            raise KeyError("youtube")
+        await self.stop(pipeline.doc["id"])
 
     async def set_service_voice(self, session_id: str, enabled: bool) -> bool:
         pipeline = self.pipelines.get(session_id)

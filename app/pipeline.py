@@ -64,6 +64,7 @@ class SessionPipeline:
         self._pending_pcm = b""
         self._pending_words: list[Word] = []
         self.speaker_language = document["speaker_language"]
+        self.doc["translation_language"] = target_language(self.speaker_language, document.get("translation_language"))
         self.buffer = np.zeros(0, dtype=np.float32)
         self.buffer_origin = 0.0
         self.session_time = 0.0
@@ -88,6 +89,8 @@ class SessionPipeline:
         self.failure_hold = False
         self.rtmp_seen = False
         self.input_level = 0.0
+        self.youtube_played = 0.0
+        self.monitors: list[asyncio.Queue] = []
 
     async def start(self) -> None:
         self.started = True
@@ -114,11 +117,16 @@ class SessionPipeline:
         await self._clear_provisional()
         await self._set_status("ended", "")
 
-    async def set_language(self, language: str) -> None:
+    def _caption_language(self) -> str:
+        return target_language(self.speaker_language, self.doc.get("translation_language"))
+
+    async def set_language(self, language: str, translation: str | None = None) -> None:
         async with self.lock:
             self.speaker_language = language
             self.doc["speaker_language"] = language
+            self.doc["translation_language"] = target_language(language, translation)
             self.generation += 1
+            self.provisional_gen += 1
         await self._emit("status")
 
     async def set_listener_count(self, count: int) -> None:
@@ -163,6 +171,9 @@ class SessionPipeline:
         if samples.size == 0:
             return
         self.last_audio_at = time.monotonic()
+        if self.doc.get("input") == "youtube":
+            self.youtube_played += len(samples) / self.config.sample_rate
+            self._offer_monitor(pcm)
         if self.doc.get("status") == "paused":
             await self._set_status("live", self._standing_banner())
         action = None
@@ -174,6 +185,49 @@ class SessionPipeline:
             self._spawn(self._decode())
         elif action["type"] == "endpoint":
             await self._finalize_detached(action, reason="endpoint")
+
+    async def drop_partial(self) -> None:
+        """Forget the audio that was still being heard. Used when a test seeks."""
+        async with self.lock:
+            self.buffer = np.zeros(0, dtype=np.float32)
+            self.speech_active = False
+            self.silence_run = 0.0
+            self.agreement.reset()
+            self.generation += 1
+            self.youtube_played = 0.0
+            self.doc["provisional"] = None
+            self.provisional_gen += 1
+            self._clear_monitors()
+        await self._emit("state")
+
+    def attach_monitor(self) -> asyncio.Queue:
+        queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+        self.monitors.append(queue)
+        return queue
+
+    def detach_monitor(self, queue: asyncio.Queue) -> None:
+        if queue in self.monitors:
+            self.monitors.remove(queue)
+
+    def _offer_monitor(self, pcm: bytes) -> None:
+        for queue in list(self.monitors):
+            if queue.full():
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+            try:
+                queue.put_nowait(pcm)
+            except asyncio.QueueFull:
+                pass
+
+    def _clear_monitors(self) -> None:
+        for queue in self.monitors:
+            while True:
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
 
     async def idle(self) -> None:
         for _ in range(300):
@@ -399,12 +453,14 @@ class SessionPipeline:
 
     async def _finish_final(self, line: CaptionLine, endpoint_at: float, stt_ms: float) -> None:
         context = self._context()
+        caption = self._caption_language()
         request = TranslationRequest(
             text=line.original,
             source_language=self.speaker_language,
             glossary=self.glossary,
             context=context,
             session_context=interpreter_background(self.doc),
+            chosen_language=caption,
         )
         started = time.monotonic()
         banner = None
@@ -413,7 +469,7 @@ class SessionPipeline:
                 self.translator.translate(request),
                 timeout=self.config.translate_timeout_seconds,
             )
-            line.translation = finish_translation(line.original, translation, _keep_words(self.glossary))
+            line.translation = finish_translation(line.original, translation, _keep_words(self.glossary), target=caption)
             line.glossary_miss = missing
             line.translate_ms = round((time.monotonic() - started) * 1000, 1)
         except Exception:
@@ -501,7 +557,7 @@ class SessionPipeline:
             return False
         try:
             clip = await asyncio.wait_for(
-                self.speaker.synthesize(text, target_language(self.speaker_language)),
+                self.speaker.synthesize(text, self._caption_language()),
                 timeout=self.config.tts_timeout_seconds,
             )
         except Exception:
@@ -520,10 +576,11 @@ class SessionPipeline:
         text = provisional.get("original") or ""
         line_id = provisional["id"]
         language = self.speaker_language
+        caption = self._caption_language()
         context = self._context()
-        self._spawn(self._translate_provisional(generation, line_id, text, language, context))
+        self._spawn(self._translate_provisional(generation, line_id, text, language, context, caption))
 
-    async def _translate_provisional(self, generation: int, line_id: str, text: str, language: str, context) -> None:
+    async def _translate_provisional(self, generation: int, line_id: str, text: str, language: str, context, caption: str) -> None:
         await asyncio.sleep(self.config.provisional_debounce_seconds)
         if generation != self.provisional_gen or not text.strip():
             return
@@ -533,6 +590,7 @@ class SessionPipeline:
             glossary=self.glossary,
             context=context,
             session_context=interpreter_background(self.doc),
+            chosen_language=caption,
         )
         try:
             translation, missing = await asyncio.wait_for(
@@ -548,7 +606,7 @@ class SessionPipeline:
             provisional = self.doc.get("provisional")
             if not provisional or provisional["id"] != line_id:
                 return
-            repaired = finish_translation(text, translation, _keep_words(self.glossary))
+            repaired = finish_translation(text, translation, _keep_words(self.glossary), target=caption)
             provisional["translation"] = repaired
             provisional["glossary_miss"] = missing
             if not provisional.get("suppressed"):
@@ -595,6 +653,12 @@ class SessionPipeline:
                     if (self.doc.get("banner") or "") == UNAVAILABLE:
                         continue
                     banner = DROPPED if self.rtmp_seen else WAITING
+                elif self.doc.get("input") == "youtube":
+                    from app.youtube import ENDED, UNAVAILABLE, WAITING
+
+                    if (self.doc.get("banner") or "") in {UNAVAILABLE, ENDED}:
+                        continue
+                    banner = WAITING
                 else:
                     banner = "No audio from the operator microphone"
                 await self._set_status("paused", banner)
@@ -621,7 +685,7 @@ class SessionPipeline:
         if self.reading or long_reading:
             reference = citation or self.reading_citation
             listener_original, listener_translation, reference_en, reference_id = reading_status(
-                reference, self.speaker_language
+                reference, self.speaker_language, self._caption_language()
             )
             line.suppressed = True
             line.listener_original = listener_original
@@ -678,6 +742,7 @@ class SessionPipeline:
                 "status": snapshot.get("status"),
                 "banner": snapshot.get("banner") or "",
                 "speaker_language": self.speaker_language,
+                "translation_language": self._caption_language(),
                 "voice": bool(snapshot.get("voice")),
                 "provisional": snapshot.get("provisional"),
                 "line": copy.deepcopy(line) if line else None,
@@ -778,7 +843,7 @@ def spoken_names(source: str) -> list[str]:
     return found
 
 
-def repair_translation(source: str, text: str, keep: set[str] | None = None) -> str:
+def repair_translation(source: str, text: str, keep: set[str] | None = None, *, target: str | None = None) -> str:
     """Correct translation mistakes that changed what the preacher said."""
     cleaned = " ".join(text.split())
     if not cleaned:
@@ -793,7 +858,8 @@ def repair_translation(source: str, text: str, keep: set[str] | None = None) -> 
         cleaned = re.sub(r"\bminggu(?=\s+(?:pagi|depan)\b)", "Minggu", cleaned)
     if re.search(r"\bmale\b", source, re.IGNORECASE) and not _ANIMAL.search(source):
         cleaned = re.sub(r"\bseekor jantan\b", "seorang laki-laki", cleaned, flags=re.IGNORECASE)
-    cleaned = _drop_copied_english(source, cleaned, kept)
+    if target != "en":
+        cleaned = _drop_copied_english(source, cleaned, kept)
     for name in sorted(spoken_names(source), key=len, reverse=True):
         cleaned = re.sub(rf"\b{re.escape(name)}\b", name, cleaned, flags=re.IGNORECASE)
     cleaned = " ".join(cleaned.split())
@@ -817,14 +883,14 @@ def _drop_copied_english(source: str, text: str, kept: set[str]) -> str:
     return "".join(token for token in tokens if not (re.fullmatch(r"[A-Za-z']+", token) and token.casefold() in drop))
 
 
-def finish_translation(source: str, text: str, keep: set[str] | None = None) -> str:
+def finish_translation(source: str, text: str, keep: set[str] | None = None, *, target: str | None = None) -> str:
     kept = set(keep or ())
     kept.update({"Tuhan", "Yesus", "Allah"})
     for name in spoken_names(source):
         kept.update(name.split())
     if re.search(r"\bSunday\b", source):
         kept.add("Minggu")
-    return polish_translation(repair_translation(source, text, kept), kept)
+    return polish_translation(repair_translation(source, text, kept, target=target), kept)
 
 
 def polish_translation(text: str, keep: set[str] | None = None) -> str:

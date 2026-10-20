@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from app.translator import target_language
+
 
 @dataclass
 class Word:
@@ -118,6 +120,7 @@ def project_session(document: dict, role: str) -> dict:
     projected = {
         "id": document["id"],
         "speaker_language": document["speaker_language"],
+        "translation_language": target_language(document["speaker_language"], document.get("translation_language")),
         "voice": bool(document.get("voice")),
         "service_name": document.get("service_name") or "",
         "church_name": document.get("church_name") or "",
