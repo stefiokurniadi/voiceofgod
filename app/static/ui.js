@@ -84,7 +84,10 @@
     const bar = document.querySelector("#topbar");
     if (!bar) return;
     const links = [["services", "/", "Services"], ["settings", "/settings", "Settings"]];
-    if (me.role === "admin") links.push(["users", "/admin", "Users"]);
+    if (me.role === "admin") {
+      links.push(["users", "/admin", "Users"]);
+      links.push(["simulation", "/simulation", "Simulation"]);
+    }
     const signOut = el("button", { class: "btn btn-ghost btn-sm", type: "button" }, "Sign out");
     signOut.addEventListener("click", async () => {
       busy(signOut, true, "Signing out");
@@ -190,13 +193,20 @@
 
   function hear() {
     let context = null;
+    let gain = null;
     let next = 0;
     let enabled = true;
+    let volume = 1;
     const sources = [];
 
     function ready() {
       if (!enabled) return null;
-      if (!context) context = new AudioContext();
+      if (!context) {
+        context = new AudioContext();
+        gain = context.createGain();
+        gain.gain.value = volume;
+        gain.connect(context.destination);
+      }
       if (context.state === "suspended") context.resume();
       return context;
     }
@@ -217,7 +227,7 @@
       for (let i = 0; i < view.length; i += 1) channel[i] = view[i] / 32768;
       const source = audio.createBufferSource();
       source.buffer = buffer;
-      source.connect(audio.destination);
+      source.connect(gain);
       const now = audio.currentTime;
       if (next < now + 0.02) next = now + 0.08;
       source.start(next);
@@ -237,8 +247,26 @@
         enabled = Boolean(value);
         if (!enabled) stop();
         else ready();
+      },
+      setVolume(value) {
+        volume = Math.max(0, Math.min(1, Number(value) || 0));
+        if (gain) gain.gain.value = volume;
       }
     };
+  }
+
+  function bindHearVolume(player, input, label) {
+    const saved = localStorage.getItem("voiceofgod-youtube-volume");
+    if (saved !== null && saved !== "") input.value = saved;
+    function apply() {
+      const level = Math.max(0, Math.min(100, Math.round(Number(input.value) || 0)));
+      input.value = String(level);
+      player.setVolume(level / 100);
+      if (label) label.textContent = `${level}%`;
+      localStorage.setItem("voiceofgod-youtube-volume", String(level));
+    }
+    input.addEventListener("input", apply);
+    apply();
   }
 
   function password(length = 14) {
@@ -249,6 +277,6 @@
 
   window.UI = {
     LANGUAGES, el, api, toast, busy, session, header, dialog, confirmAction,
-    statusBadge, setBadge, parseDay, formatDate, today, captionLanguage, languagePair, lines, copy, hear, password
+    statusBadge, setBadge, parseDay, formatDate, today, captionLanguage, languagePair, lines, copy, hear, bindHearVolume, password
   };
 })();

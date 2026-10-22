@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <meta name="theme-color" content="#0b0b0d">
+  <title>Simulation · voiceofgod</title>
+  <link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar" id="topbar"></header>
+  <main class="page">
+    <div class="page-head">
+      <div>
+        <h1>Simulation</h1>
+        <p>Test captions without a live service. The microphone stays off.</p>
+      </div>
+    </div>
+    <section class="card" aria-labelledby="youtube-heading">
+      <div class="card-head">
+        <h2 id="youtube-heading">YouTube test</h2>
+        <p>Play a YouTube video into speech recognition, and hear it in this browser. One test at a time. Captions open on the operator page.</p>
+      </div>
+      <form id="youtube-form">
+        <div class="card-body">
+          <div class="field">
+            <label for="youtube-url">YouTube link</label>
+            <input id="youtube-url" type="url" inputmode="url" autocomplete="off" spellcheck="false" placeholder="https://www.youtube.com/watch?v=" required>
+          </div>
+          <div class="field">
+            <label for="youtube-language">Speaker language</label>
+            <select id="youtube-language">
+              <option value="en">English</option>
+              <option value="id">Bahasa Indonesia</option>
+            </select>
+          </div>
+          <div class="field">
+            <label class="switch">
+              <input type="checkbox" id="youtube-hear" role="switch" checked>
+              <span class="switch-track" aria-hidden="true"></span>
+              <span class="switch-text">
+                <strong>Play the video sound</strong>
+                <small>Turn this off if another tab is already playing it.</small>
+              </span>
+            </label>
+          </div>
+          <div class="field">
+            <label for="youtube-volume">Volume</label>
+            <input id="youtube-volume" type="range" min="0" max="100" step="1" value="100">
+            <p class="hint" id="youtube-volume-label">100%</p>
+          </div>
+          <p class="alert" id="youtube-alert" role="alert" hidden></p>
+          <div class="field" id="youtube-seek" hidden>
+            <label for="youtube-range">Position</label>
+            <input id="youtube-range" type="range" min="0" max="1" step="1" value="0">
+            <p class="hint" id="youtube-clock">Release the slider to continue from that time.</p>
+          </div>
+        </div>
+        <div class="card-foot">
+          <button class="btn btn-primary" id="youtube-start" type="submit">Start test</button>
+          <button class="btn btn-primary btn-icon" id="youtube-resume" type="button" hidden aria-label="Start" title="Start">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+          </button>
+          <button class="btn btn-icon" id="youtube-pause" type="button" hidden aria-label="Pause" title="Pause">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 5h3.5v14H7V5zm6.5 0H17v14h-3.5V5z"/></svg>
+          </button>
+          <a class="btn" id="youtube-open" hidden>Open operator page</a>
+          <button class="btn btn-danger" id="youtube-stop" type="button" hidden>Stop</button>
+        </div>
+      </form>
+    </section>
+  </main>
+  <script src="/static/ui.js"></script>
+  <script>
+    const youtubeForm = document.querySelector("#youtube-form");
+    const youtubeAlert = document.querySelector("#youtube-alert");
+    const youtubeStart = document.querySelector("#youtube-start");
+    const youtubeResume = document.querySelector("#youtube-resume");
+    const youtubePause = document.querySelector("#youtube-pause");
+    const youtubeStop = document.querySelector("#youtube-stop");
+    const youtubeOpen = document.querySelector("#youtube-open");
+    const youtubeUrl = document.querySelector("#youtube-url");
+    const youtubeSeek = document.querySelector("#youtube-seek");
+    const youtubeRange = document.querySelector("#youtube-range");
+    const youtubeClock = document.querySelector("#youtube-clock");
+    let youtubeDrag = false;
+    let youtubePoll = null;
+    let monitorUrl = "";
+    let monitorSocket = null;
+    const player = UI.hear();
+    const youtubeHear = document.querySelector("#youtube-hear");
+    youtubeHear.addEventListener("change", () => player.setEnabled(youtubeHear.checked));
+    UI.bindHearVolume(player, document.querySelector("#youtube-volume"), document.querySelector("#youtube-volume-label"));
+    document.addEventListener("pointerdown", () => { if (youtubeHear.checked) player.unlock(); });
+
+    function closeMonitor() {
+      monitorUrl = "";
+      if (monitorSocket) {
+        monitorSocket.onclose = null;
+        monitorSocket.close();
+        monitorSocket = null;
+      }
+      player.stop();
+    }
+
+    function openMonitor(operatorUrl) {
+      if (!operatorUrl) return;
+      if (operatorUrl === monitorUrl && monitorSocket && monitorSocket.readyState <= 1) return;
+      if (monitorSocket) {
+        monitorSocket.onclose = null;
+        monitorSocket.close();
+      }
+      monitorUrl = operatorUrl;
+      const page = new URL(operatorUrl, location.origin);
+      const id = page.pathname.split("/").filter(Boolean).pop();
+      const secret = page.searchParams.get("k") || "";
+      const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws/operate/${id}?k=${encodeURIComponent(secret)}`);
+      monitorSocket = socket;
+      socket.binaryType = "arraybuffer";
+      socket.onmessage = (message) => {
+        if (message.data instanceof ArrayBuffer) player.play(message.data);
+      };
+      socket.onclose = () => {
+        if (monitorSocket !== socket || !monitorUrl) return;
+        monitorSocket = null;
+        setTimeout(() => { if (monitorUrl) openMonitor(monitorUrl); }, 1000);
+      };
+    }
+
+    function clock(seconds) {
+      const whole = Math.max(0, Math.floor(Number(seconds) || 0));
+      return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+    }
+
+    function showYoutube(state) {
+      const active = Boolean(state && state.active);
+      const playing = active && state.status === "live" && !state.paused;
+      youtubeStop.hidden = !active;
+      youtubeStart.hidden = active;
+      youtubeStart.disabled = active;
+      youtubeResume.hidden = !active || playing;
+      youtubePause.hidden = !playing;
+      if (!playing) player.stop();
+      youtubeUrl.required = !active;
+      youtubeUrl.readOnly = active;
+      if (active && state.url) youtubeUrl.value = state.url;
+      if (active && state.operator_url) {
+        youtubeOpen.href = state.operator_url;
+        youtubeOpen.hidden = false;
+      } else if (!active) {
+        youtubeOpen.hidden = true;
+        youtubeOpen.removeAttribute("href");
+      }
+      if (active && state.banner) {
+        youtubeAlert.hidden = false;
+        youtubeAlert.textContent = state.banner;
+      } else {
+        youtubeAlert.hidden = true;
+        youtubeAlert.textContent = "";
+      }
+      const duration = Number(state && state.duration) || 0;
+      const live = Boolean(state && state.live);
+      youtubeSeek.hidden = !active || live;
+      youtubeRange.disabled = !active || live;
+      if (duration > 0) youtubeRange.max = String(Math.floor(duration));
+      if (active && !youtubeDrag) youtubeRange.value = String(Math.floor(Number(state.position) || 0));
+      if (live) youtubeClock.textContent = "A live stream cannot be moved.";
+      else if (duration) youtubeClock.textContent = `${clock(state.position)} / ${clock(duration)}. Release the slider to continue from that time.`;
+      else youtubeClock.textContent = "Release the slider to continue from that time.";
+      if (active && state.operator_url) openMonitor(state.operator_url);
+      else if (!active) closeMonitor();
+      if (active && !youtubePoll) youtubePoll = setInterval(loadYoutube, 1000);
+      if (!active && youtubePoll) {
+        clearInterval(youtubePoll);
+        youtubePoll = null;
+      }
+    }
+
+    async function loadYoutube() {
+      showYoutube(await UI.api("/api/admin/youtube"));
+    }
+
+    youtubeForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      youtubeAlert.hidden = true;
+      youtubeAlert.textContent = "";
+      if (youtubeHear.checked) player.unlock();
+      UI.busy(youtubeStart, true, "Starting");
+      try {
+        const created = await UI.api("/api/admin/youtube", {
+          method: "POST",
+          body: {
+            url: youtubeUrl.value.trim(),
+            speaker_language: document.querySelector("#youtube-language").value
+          },
+          fallback: "Could not start the YouTube test."
+        });
+        showYoutube({ active: true, status: "live", url: youtubeUrl.value.trim(), operator_url: created.operator_url, banner: "" });
+        UI.toast("YouTube test started", "success");
+      } catch (err) {
+        youtubeAlert.hidden = false;
+        youtubeAlert.textContent = err.message;
+      } finally {
+        UI.busy(youtubeStart, false);
+        if (youtubeStart.hidden) youtubeStart.disabled = true;
+      }
+    });
+
+    youtubeRange.addEventListener("pointerdown", () => { youtubeDrag = true; });
+    youtubeRange.addEventListener("pointerup", () => { youtubeDrag = false; });
+    youtubeRange.addEventListener("change", async () => {
+      youtubeDrag = false;
+      player.stop();
+      try {
+        const place = await UI.api("/api/admin/youtube/seek", {
+          method: "POST",
+          body: { seconds: Number(youtubeRange.value) },
+          fallback: "Could not move the video."
+        });
+        youtubeRange.value = String(Math.floor(place.position || 0));
+        UI.toast(`Continuing from ${clock(place.position)}`, "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      }
+    });
+
+    youtubePause.addEventListener("click", async () => {
+      player.stop();
+      UI.busy(youtubePause, true, "Pausing");
+      try {
+        showYoutube(await UI.api("/api/admin/youtube/pause", { method: "POST", fallback: "Could not pause the video." }));
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(youtubePause, false);
+      }
+    });
+
+    youtubeResume.addEventListener("click", async () => {
+      if (youtubeHear.checked) player.unlock();
+      UI.busy(youtubeResume, true, "Starting");
+      try {
+        showYoutube(await UI.api("/api/admin/youtube/resume", { method: "POST", fallback: "Could not start the video." }));
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(youtubeResume, false);
+      }
+    });
+
+    youtubeStop.addEventListener("click", async () => {
+      UI.busy(youtubeStop, true, "Stopping");
+      try {
+        await UI.api("/api/admin/youtube/stop", { method: "POST", fallback: "Could not stop the YouTube test." });
+        youtubeUrl.readOnly = false;
+        youtubeUrl.required = true;
+        await loadYoutube();
+        UI.toast("YouTube test stopped", "success");
+      } catch (err) {
+        UI.toast(err.message, "error");
+      } finally {
+        UI.busy(youtubeStop, false);
+      }
+    });
+
+    UI.session({ church: false }).then(async (profile) => {
+      if (profile.role !== "admin") {
+        location.replace("/");
+        return;
+      }
+      UI.header(profile, "simulation");
+      await loadYoutube();
+    }).catch((err) => UI.toast(err.message, "error"));
+  </script>
+</body>
+</html>

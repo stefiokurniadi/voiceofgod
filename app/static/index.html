@@ -29,8 +29,8 @@
   <dialog class="dialog" id="create-dialog">
     <form id="create" method="dialog" novalidate>
       <div class="dialog-head">
-        <h2>New service</h2>
-        <p>Open the console, press Start, and listeners scan the QR code.</p>
+        <h2 id="dialog-title">New service</h2>
+        <p id="dialog-copy">Open the console, press Start, and listeners scan the QR code.</p>
       </div>
       <div class="dialog-body">
         <p class="alert" id="error" role="alert"></p>
@@ -90,8 +90,11 @@
     const error = document.querySelector("#error");
     const submit = document.querySelector("#submit");
     const note = document.querySelector("#note");
+    const dialogTitle = document.querySelector("#dialog-title");
+    const dialogCopy = document.querySelector("#dialog-copy");
     const SERVICE_NOTE = "Preacher:\nPassage:\nAnything else about this service:\n";
     let profile = null;
+    let editing = null;
 
     function language() {
       return document.querySelector("input[name=language]:checked").value;
@@ -116,19 +119,26 @@
       if (service.service_date) meta.unshift(UI.formatDate(service.service_date));
       else meta.unshift(`Created ${UI.formatDate(service.created_at)}`);
       if (service.tts_enabled) meta.push("Spoken translation");
-      return UI.el("a", { class: "service", href: `/o/${service.id}` },
-        UI.el("div", { class: "service-date", "aria-hidden": "true" },
-          UI.el("small", {}, date ? date.toLocaleDateString(undefined, { month: "short" }) : ""),
-          UI.el("strong", {}, date ? String(date.getDate()) : "")
+      return UI.el("div", { class: "service" },
+        UI.el("a", { class: "service-open", href: `/o/${service.id}` },
+          UI.el("div", { class: "service-date", "aria-hidden": "true" },
+            UI.el("small", {}, date ? date.toLocaleDateString(undefined, { month: "short" }) : ""),
+            UI.el("strong", {}, date ? String(date.getDate()) : "")
+          ),
+          UI.el("div", { class: "service-main" },
+            UI.el("h3", {}, service.name),
+            UI.el("div", { class: "service-meta" }, meta.map((item) => UI.el("span", {}, item)))
+          ),
+          UI.el("div", { class: "service-side" },
+            UI.statusBadge(service.status),
+            UI.el("span", { class: "chevron", "aria-hidden": "true" }, "›")
+          )
         ),
-        UI.el("div", { class: "service-main" },
-          UI.el("h3", {}, service.name),
-          UI.el("div", { class: "service-meta" }, meta.map((item) => UI.el("span", {}, item)))
-        ),
-        UI.el("div", { class: "service-side" },
-          UI.statusBadge(service.status),
-          UI.el("span", { class: "chevron", "aria-hidden": "true" }, "›")
-        )
+        UI.el("button", {
+          class: "btn btn-sm service-edit",
+          type: "button",
+          onclick: () => openEdit(service)
+        }, "Edit")
       );
     }
 
@@ -150,19 +160,47 @@
       list.replaceChildren(...(services.length ? services.map(row) : [empty()]));
     }
 
-    function openCreate() {
+    function fillForm(service) {
       error.textContent = "";
-      document.querySelector("#name").value = "";
-      document.querySelector("#date").value = UI.today();
-      const speaker = (profile && profile.speaker_language) || "en";
+      editing = service;
+      dialogTitle.textContent = service ? "Edit service" : "New service";
+      dialogCopy.textContent = service
+        ? "Listeners see the new name. The note is background for the interpreter."
+        : "Open the console, press Start, and listeners scan the QR code.";
+      submit.textContent = service ? "Save" : "Create and open";
+      document.querySelector("#name").value = service ? service.name : "";
+      document.querySelector("#date").value = service && service.service_date ? service.service_date : (service ? "" : UI.today());
+      const speaker = (service && service.speaker_language) || (profile && profile.speaker_language) || "en";
       document.querySelector(`input[name=language][value="${speaker}"]`).checked = true;
-      const caption = (profile && profile.translation_language) || "id";
+      const caption = (service && service.translation_language) || (profile && profile.translation_language) || "id";
       document.querySelector(`input[name=caption][value="${caption === "en" ? "en" : "id"}"]`).checked = true;
-      document.querySelector("#voice").checked = Boolean(profile && profile.tts_enabled);
-      note.value = SERVICE_NOTE;
+      document.querySelector("#voice").checked = service ? Boolean(service.tts_enabled) : Boolean(profile && profile.tts_enabled);
+      note.value = service ? (service.note || "") : SERVICE_NOTE;
       showLanguageHint();
+    }
+
+    function openCreate() {
+      fillForm(null);
       createDialog.showModal();
       document.querySelector("#name").focus();
+    }
+
+    function openEdit(service) {
+      fillForm(service);
+      createDialog.showModal();
+      document.querySelector("#name").focus();
+    }
+
+    function serviceBody() {
+      const written = note.value.trim();
+      return {
+        name: document.querySelector("#name").value.trim(),
+        service_date: document.querySelector("#date").value,
+        speaker_language: language(),
+        translation_language: captionChoice(),
+        tts_enabled: document.querySelector("#voice").checked,
+        note: !editing && written === SERVICE_NOTE.trim() ? "" : note.value
+      };
     }
 
     document.querySelector("#new-service").addEventListener("click", openCreate);
@@ -180,22 +218,27 @@
         document.querySelector("#name").focus();
         return;
       }
-      UI.busy(submit, true, "Creating");
+      const saving = editing;
+      UI.busy(submit, true, saving ? "Saving" : "Creating");
       try {
-        const created = await UI.api("/api/sessions", {
-          method: "POST",
-          body: {
-            name,
-            service_date: document.querySelector("#date").value,
-            speaker_language: language(),
-            translation_language: captionChoice(),
-            tts_enabled: document.querySelector("#voice").checked,
-            note: note.value.trim() === SERVICE_NOTE.trim() ? "" : note.value
-          },
-          fallback: "Could not create the service."
-        });
-        sessionStorage.setItem(`voiceofgod-secret-${created.id}`, created.operator_secret);
-        location.href = `/o/${created.id}`;
+        if (saving) {
+          await UI.api(`/api/sessions/${saving.id}`, {
+            method: "PUT",
+            body: serviceBody(),
+            fallback: "Could not save the service."
+          });
+          createDialog.close();
+          UI.busy(submit, false);
+          await load();
+        } else {
+          const created = await UI.api("/api/sessions", {
+            method: "POST",
+            body: serviceBody(),
+            fallback: "Could not create the service."
+          });
+          sessionStorage.setItem(`voiceofgod-secret-${created.id}`, created.operator_secret);
+          location.href = `/o/${created.id}`;
+        }
       } catch (err) {
         error.textContent = err.message;
         UI.busy(submit, false);

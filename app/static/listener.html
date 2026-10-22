@@ -61,7 +61,12 @@
       return "translation";
     }
 
-    const view = CaptionView(captions, { fieldOf, jumpButton: document.querySelector("#jump") });
+    const view = CaptionView(captions, {
+      fieldOf,
+      finalsOnly: () => fieldOf() === "translation",
+      dictate: () => fieldOf() === "original",
+      jumpButton: document.querySelector("#jump")
+    });
 
     function setStatus(status) {
       const [className, label] = STATUS[status] || STATUS.ready;
@@ -216,6 +221,10 @@
         snapshot.banner = event.banner || "";
         snapshot.speaker_language = event.speaker_language || snapshot.speaker_language;
         snapshot.translation_language = event.translation_language || snapshot.translation_language;
+        if (event.service_name) {
+          snapshot.service_name = event.service_name;
+          describe(snapshot);
+        }
         speaker = snapshot.speaker_language || speaker;
         translationLanguage = snapshot.translation_language || translationLanguage;
         if (event.line && event.line.state === "final") mergeLines([event.line]);

@@ -21,6 +21,12 @@ def hash_token(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
+def _named_provider(value, default: str, allowed: set[str]) -> str:
+    if value in allowed:
+        return value
+    return default
+
+
 def token_matches(token: str, token_hash: str) -> bool:
     if not token or not token_hash:
         return False
@@ -28,13 +34,32 @@ def token_matches(token: str, token_hash: str) -> bool:
 
 
 class Director:
-    def __init__(self, settings, repository, recognizer, translator, glossary, pipeline_config: PipelineConfig | None = None, speaker=None, accounts=None):
+    def __init__(
+        self,
+        settings,
+        repository,
+        recognizer,
+        translator,
+        glossary,
+        pipeline_config: PipelineConfig | None = None,
+        speaker=None,
+        accounts=None,
+        recognizers=None,
+        speakers=None,
+    ):
         self.settings = settings
         self.repository = repository
         self.accounts = accounts
         self.recognizer = recognizer
+        self.recognizers = {"default": recognizer}
+        if recognizers:
+            self.recognizers.update(recognizers)
+        self.recognizers.setdefault("default", recognizer)
         self.translator = translator
         self.speaker = speaker
+        self.speakers = dict(speakers or {})
+        if speaker is not None:
+            self.speakers.setdefault("google", speaker)
         self.glossary = glossary
         self.pipeline_config = pipeline_config
         self.pipelines: dict[str, SessionPipeline] = {}
@@ -78,7 +103,9 @@ class Director:
         terms = terms or []
         if len(terms) > 100:
             raise ValueError("The glossary is too large.")
-        self.recognizer.ensure_loaded()
+        stt_provider = _named_provider(user.get("stt_provider"), "default", {"default", "soniox"})
+        tts_provider = _named_provider(user.get("tts_provider"), "google", {"google", "soniox"})
+        self._recognizer_for({"stt_provider": stt_provider}).ensure_loaded()
         translator_ready = await self.translator.healthy()
         if self.settings.require_translator and not translator_ready:
             raise RuntimeError("Translator is not ready.")
@@ -102,6 +129,8 @@ class Director:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "glossary": glossary.to_dict(),
             "voice": bool(voice),
+            "stt_provider": stt_provider,
+            "tts_provider": tts_provider,
             "church_id": str(user["church_id"]),
             "church_name": user.get("church_name") or "",
             "church_note": user.get("church_note") or "",
@@ -141,6 +170,59 @@ class Director:
             "translation_language": caption,
         }
 
+    async def update_session(
+        self,
+        session_id: str,
+        name: str,
+        note: str,
+        service_date,
+        speaker_language: str,
+        voice: bool,
+        translation_language: str | None = None,
+    ) -> dict:
+        from app.translator import CAPTION_LANGUAGE_ERROR, SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR, target_language
+
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        if speaker_language not in SPEAKER_LANGUAGES:
+            raise ValueError(SPEAKER_LANGUAGE_ERROR)
+        if speaker_language == "mix" and translation_language not in (None, "", "en", "id"):
+            raise ValueError(CAPTION_LANGUAGE_ERROR)
+        cleaned_name = (name or "").strip()
+        if not cleaned_name:
+            raise ValueError("Give the service a name.")
+        if len(cleaned_name) > 120:
+            raise ValueError("The service name is too long.")
+        cleaned_note = (note or "").strip()
+        if len(cleaned_note) > 4000:
+            raise ValueError("The service note is too long.")
+        caption = target_language(speaker_language, translation_language or pipeline.doc.get("translation_language"))
+        async with pipeline.lock:
+            pipeline.doc["service_name"] = cleaned_name
+            pipeline.doc["service_note"] = cleaned_note
+            pipeline.doc["service_date"] = service_date.isoformat() if service_date else ""
+        language_changed = (
+            speaker_language != pipeline.speaker_language
+            or caption != pipeline.doc.get("translation_language")
+        )
+        voice_changed = bool(voice) != bool(pipeline.doc.get("voice"))
+        if language_changed:
+            await pipeline.set_language(speaker_language, translation_language)
+        if voice_changed:
+            await pipeline.set_voice(bool(voice))
+        if not language_changed and not voice_changed:
+            await pipeline._emit("status")
+        await self.remember(session_id)
+        return {
+            "name": cleaned_name,
+            "note": cleaned_note,
+            "service_date": pipeline.doc.get("service_date") or "",
+            "speaker_language": speaker_language,
+            "translation_language": caption,
+            "tts_enabled": bool(voice),
+        }
+
     def _bind(self, document: dict, glossary=None):
         from app.glossary import Glossary
 
@@ -153,14 +235,27 @@ class Director:
         pipeline = SessionPipeline(
             document,
             self.repository,
-            self.recognizer,
+            self._recognizer_for(document),
             self.translator,
             glossary,
             self.pipeline_config,
-            self.speaker,
+            self._speaker_for(document),
         )
         pipeline.durable = self._durable
         return pipeline
+
+    def _recognizer_for(self, document: dict):
+        name = document.get("stt_provider") or "default"
+        found = self.recognizers.get(name)
+        if found is not None:
+            return found
+        return self.recognizers.get("default", self.recognizer)
+
+    def _speaker_for(self, document: dict):
+        name = document.get("tts_provider") or "google"
+        if name in self.speakers:
+            return self.speakers[name]
+        return self.speaker
 
     async def _durable(self, document: dict) -> None:
         if self.accounts is not None:
@@ -193,9 +288,9 @@ class Director:
             pipeline = self._bind(document, glossary)
             self.pipelines[session_id] = pipeline
             await self.repository.save(session_id, document)
+            await asyncio.to_thread(pipeline.recognizer.ensure_loaded)
             restored += 1
         if restored:
-            await asyncio.to_thread(self.recognizer.ensure_loaded)
             logger.info("restored %s sessions", restored)
         return restored
 
@@ -238,6 +333,8 @@ class Director:
             else:
                 await self.ingest.start(session_id)
         if pipeline.doc.get("input") == "youtube":
+            async with pipeline.lock:
+                pipeline.doc["youtube_paused"] = False
             if not youtube_ready() and self.youtube.resolve is None:
                 await pipeline._set_status("live", YOUTUBE_UNAVAILABLE)
             else:
@@ -340,7 +437,7 @@ class Director:
             raise RuntimeError("A YouTube test is already running.")
         if self.live_count() >= self.settings.max_live_sessions:
             raise RuntimeError(f"This server is already running {self.settings.max_live_sessions} sessions.")
-        self.recognizer.ensure_loaded()
+        self._recognizer_for({}).ensure_loaded()
         translator_ready = await self.translator.healthy()
         if self.settings.require_translator and not translator_ready:
             raise RuntimeError("Translator is not ready.")
@@ -404,6 +501,7 @@ class Director:
             "url": pipeline.doc.get("youtube_url") or "",
             "status": pipeline.doc.get("status") or "",
             "banner": pipeline.doc.get("banner") or "",
+            "paused": bool(pipeline.doc.get("youtube_paused")),
             **self.youtube_position(pipeline),
         }
         if secret:
@@ -440,12 +538,49 @@ class Director:
         await self.youtube.stop(session_id)
         async with pipeline.lock:
             pipeline.doc["youtube_offset"] = target
+            pipeline.doc["youtube_paused"] = False
         await pipeline.drop_partial()
         if pipeline.doc.get("status") == "ended" or not pipeline.started:
             await self.start(session_id)
         else:
             if pipeline.doc.get("status") != "live":
                 await pipeline._set_status("live", pipeline._standing_banner())
+            if not youtube_ready() and self.youtube.resolve is None:
+                await pipeline._set_status("live", YOUTUBE_UNAVAILABLE)
+            else:
+                await self.youtube.start(session_id)
+        return self.youtube_position(pipeline)
+
+    async def pause_youtube_test(self, session_id: str | None = None) -> dict:
+        pipeline = self.active_youtube()
+        if pipeline is None or (session_id is not None and pipeline.doc["id"] != session_id):
+            raise KeyError("youtube")
+        if pipeline.doc.get("youtube_paused") or pipeline.doc.get("status") != "live":
+            return self.youtube_position(pipeline)
+        async with pipeline.lock:
+            pipeline.doc["youtube_paused"] = True
+        await self.youtube.stop(pipeline.doc["id"])
+        place = self.youtube_position(pipeline)
+        async with pipeline.lock:
+            if not pipeline.doc.get("youtube_live"):
+                pipeline.doc["youtube_offset"] = place["position"]
+        await pipeline.drop_partial()
+        await pipeline._set_status("paused", "Paused.")
+        return self.youtube_position(pipeline)
+
+    async def resume_youtube_test(self, session_id: str | None = None) -> dict:
+        pipeline = self.active_youtube()
+        if pipeline is None or (session_id is not None and pipeline.doc["id"] != session_id):
+            raise KeyError("youtube")
+        if pipeline.doc.get("status") == "live" and self.youtube.running(pipeline.doc["id"]) and not pipeline.doc.get("youtube_paused"):
+            return self.youtube_position(pipeline)
+        async with pipeline.lock:
+            pipeline.doc["youtube_paused"] = False
+        session_id = pipeline.doc["id"]
+        if not pipeline.started or pipeline.doc.get("status") == "ended":
+            await self.start(session_id)
+        else:
+            await pipeline._set_status("live", pipeline._standing_banner())
             if not youtube_ready() and self.youtube.resolve is None:
                 await pipeline._set_status("live", YOUTUBE_UNAVAILABLE)
             else:
@@ -504,7 +639,7 @@ class Director:
             document["status"] = "paused"
             document["banner"] = "The caption service restarted. Press Start to continue."
             document.setdefault("metrics", {})["listeners"] = 0
-        self.recognizer.ensure_loaded()
+        self._recognizer_for(document).ensure_loaded()
         pipeline = self._bind(document)
         self.pipelines[session_id] = pipeline
         await self.repository.save(session_id, document)

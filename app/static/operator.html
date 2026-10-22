@@ -13,7 +13,12 @@
   <header class="console-bar">
     <a class="console-back" href="/" id="back" aria-label="All services" title="All services">←</a>
     <div class="console-title">
-      <h1 id="service-title">Service</h1>
+      <div class="console-name">
+        <h1 id="service-title">Service</h1>
+        <button class="btn btn-ghost btn-icon" id="edit-service" type="button" aria-label="Edit service" title="Edit service">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
+      </div>
       <p id="service-sub"></p>
     </div>
     <div class="console-status">
@@ -63,8 +68,21 @@
               </label>
             </div>
             <div class="field">
+              <label for="youtube-volume">Volume</label>
+              <input id="youtube-volume" type="range" min="0" max="100" step="1" value="100">
+              <p class="hint" id="youtube-volume-label">100%</p>
+            </div>
+            <div class="field">
               <label for="youtube-range">Position</label>
-              <input id="youtube-range" type="range" min="0" max="1" step="1" value="0">
+              <div class="youtube-controls">
+                <button class="btn btn-icon" id="youtube-pause" type="button" hidden aria-label="Pause" title="Pause">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M7 5h3.5v14H7V5zm6.5 0H17v14h-3.5V5z"/></svg>
+                </button>
+                <button class="btn btn-primary btn-icon" id="youtube-resume" type="button" hidden aria-label="Start" title="Start">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M8 5.5v13l11-6.5-11-6.5z"/></svg>
+                </button>
+                <input id="youtube-range" type="range" min="0" max="1" step="1" value="0">
+              </div>
               <p class="hint" id="youtube-clock">0:00</p>
             </div>
           </section>
@@ -234,6 +252,63 @@
       </section>
     </div>
   </div>
+
+  <dialog class="dialog" id="edit-dialog">
+    <form id="edit-form" method="dialog" novalidate>
+      <div class="dialog-head">
+        <h2>Edit service</h2>
+        <p>Listeners see the new name. The note is background for the interpreter.</p>
+      </div>
+      <div class="dialog-body">
+        <p class="alert" id="edit-error" role="alert"></p>
+        <div class="field-row">
+          <div class="field">
+            <label for="edit-name">Service name</label>
+            <input id="edit-name" type="text" maxlength="120" required>
+          </div>
+          <div class="field">
+            <label for="edit-date">Date</label>
+            <input id="edit-date" type="date">
+          </div>
+        </div>
+        <div class="field">
+          <span class="label" id="edit-language-label">The preacher speaks</span>
+          <div class="segmented block" role="radiogroup" aria-labelledby="edit-language-label">
+            <label><input type="radio" name="edit-language" value="en"><span>English</span></label>
+            <label><input type="radio" name="edit-language" value="id"><span>Bahasa Indonesia</span></label>
+            <label><input type="radio" name="edit-language" value="mix"><span>Mixed</span></label>
+          </div>
+          <div class="field" id="edit-caption-field" hidden>
+            <span class="label" id="edit-caption-label">Listeners read</span>
+            <div class="segmented block" role="radiogroup" aria-labelledby="edit-caption-label">
+              <label><input type="radio" name="edit-caption" value="id" checked><span>Bahasa Indonesia</span></label>
+              <label><input type="radio" name="edit-caption" value="en"><span>English</span></label>
+            </div>
+          </div>
+          <p class="hint" id="edit-language-hint">Listeners read Bahasa Indonesia.</p>
+        </div>
+        <div class="field">
+          <label class="switch">
+            <input type="checkbox" id="edit-voice" role="switch">
+            <span class="switch-track" aria-hidden="true"></span>
+            <span class="switch-text">
+              <strong>Spoken translation</strong>
+              <small>Listeners can tap Listen to hear each line through headphones.</small>
+            </span>
+          </label>
+        </div>
+        <div class="field">
+          <label for="edit-note">About this service <span class="optional">· optional</span></label>
+          <textarea id="edit-note"></textarea>
+          <p class="hint">Background for the interpreter. Do not paste Bible verses or song lyrics.</p>
+        </div>
+      </div>
+      <div class="dialog-foot">
+        <button class="btn" type="button" id="edit-cancel">Cancel</button>
+        <button class="btn btn-primary" type="submit" id="edit-save">Save</button>
+      </div>
+    </form>
+  </dialog>
   <script src="/static/ui.js"></script>
   <script src="/static/captions.js"></script>
   <script>
@@ -267,12 +342,15 @@
     const originalView = CaptionView(document.querySelector("#original"), {
       fieldOf: () => "full_original",
       decorate: decorate,
-      keepHidden: true
+      keepHidden: true,
+      dictate: () => true,
+      showTime: true
     });
     const translationView = CaptionView(document.querySelector("#translation"), {
       fieldOf: () => "full_translation",
       keepHidden: true,
-      finalsOnly: true
+      finalsOnly: true,
+      showTime: true
     });
 
     for (const tab of document.querySelectorAll("[role=tab]")) {
@@ -353,6 +431,10 @@
     function setStatus(status) {
       UI.setBadge(statusBadge, status);
       document.title = `${status === "live" ? "● " : ""}${snapshot.service_name || "Console"} · voiceofgod`;
+      const playing = inputMode === "youtube" && status === "live";
+      document.querySelector("#youtube-pause").hidden = !playing;
+      document.querySelector("#youtube-resume").hidden = inputMode !== "youtube" || playing;
+      if (inputMode === "youtube" && !playing) player.stop();
     }
 
     function setBanner(status, text) {
@@ -389,6 +471,9 @@
       document.querySelector("#source-hint").textContent = inputMode === "youtube"
         ? "This test plays the YouTube video. The microphone stays off."
         : "Change the source while the service is not running.";
+      const playing = inputMode === "youtube" && snapshot.status === "live";
+      document.querySelector("#youtube-pause").hidden = !playing;
+      document.querySelector("#youtube-resume").hidden = inputMode !== "youtube" || playing;
       document.querySelector("#wave").setAttribute("aria-label", externalAudio() ? "Incoming audio level" : "Microphone waveform");
     }
 
@@ -627,6 +712,13 @@
           setSourceLocked(event.status);
           setRunning(event.status === "live" && (externalAudio() || Boolean(stream)));
         }
+        if (event.service_name) {
+          snapshot.service_name = event.service_name;
+          document.querySelector("#service-title").textContent = event.service_name;
+          document.title = `${event.status === "live" ? "● " : ""}${event.service_name} · voiceofgod`;
+        }
+        if ("service_note" in event) snapshot.service_note = event.service_note || "";
+        if ("service_date" in event) snapshot.service_date = event.service_date || "";
         if (event.speaker_language) {
           const speakerChanged = event.speaker_language !== document.querySelector("#language").value;
           const captionChanged = event.translation_language && event.translation_language !== document.querySelector("#translation-language").value;
@@ -908,7 +1000,122 @@
     const player = UI.hear();
     const youtubeHear = document.querySelector("#youtube-hear");
     youtubeHear.addEventListener("change", () => player.setEnabled(youtubeHear.checked));
+    UI.bindHearVolume(player, document.querySelector("#youtube-volume"), document.querySelector("#youtube-volume-label"));
     document.addEventListener("pointerdown", () => { if (youtubeHear.checked) player.unlock(); });
+
+    function editSpeaker() {
+      const selected = document.querySelector("input[name=edit-language]:checked");
+      return selected ? selected.value : "en";
+    }
+
+    function editCaption() {
+      const selected = document.querySelector("input[name=edit-caption]:checked");
+      return selected ? selected.value : "id";
+    }
+
+    function showEditLanguage() {
+      const speaker = editSpeaker();
+      document.querySelector("#edit-caption-field").hidden = speaker !== "mix";
+      const caption = UI.captionLanguage(speaker, editCaption());
+      document.querySelector("#edit-language-hint").textContent =
+        caption === "en" ? "Listeners read English." : "Listeners read Bahasa Indonesia.";
+    }
+
+    function openEdit() {
+      document.querySelector("#edit-error").textContent = "";
+      document.querySelector("#edit-name").value = snapshot.service_name || "";
+      document.querySelector("#edit-date").value = snapshot.service_date || "";
+      document.querySelector("#edit-note").value = snapshot.service_note || "";
+      const speaker = snapshot.speaker_language || "en";
+      const speakerInput = document.querySelector(`input[name=edit-language][value="${speaker}"]`);
+      if (speakerInput) speakerInput.checked = true;
+      const caption = snapshot.translation_language === "en" ? "en" : "id";
+      document.querySelector(`input[name=edit-caption][value="${caption}"]`).checked = true;
+      document.querySelector("#edit-voice").checked = Boolean(snapshot.voice);
+      showEditLanguage();
+      document.querySelector("#edit-dialog").showModal();
+      document.querySelector("#edit-name").focus();
+    }
+
+    document.querySelector("#edit-service").addEventListener("click", openEdit);
+    document.querySelector("#edit-cancel").addEventListener("click", () => document.querySelector("#edit-dialog").close());
+    for (const input of document.querySelectorAll("input[name=edit-language], input[name=edit-caption]")) {
+      input.addEventListener("change", showEditLanguage);
+    }
+    document.querySelector("#edit-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const editError = document.querySelector("#edit-error");
+      const save = document.querySelector("#edit-save");
+      editError.textContent = "";
+      const name = document.querySelector("#edit-name").value.trim();
+      if (!name) {
+        editError.textContent = "Give the service a name.";
+        document.querySelector("#edit-name").focus();
+        return;
+      }
+      UI.busy(save, true, "Saving");
+      try {
+        const response = await fetch(`/api/sessions/${sessionId}`, {
+          method: "PUT",
+          headers,
+          body: JSON.stringify({
+            name,
+            service_date: document.querySelector("#edit-date").value,
+            speaker_language: editSpeaker(),
+            translation_language: editCaption(),
+            tts_enabled: document.querySelector("#edit-voice").checked,
+            note: document.querySelector("#edit-note").value
+          })
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || "Could not save the service.");
+        snapshot = {
+          ...snapshot,
+          service_name: body.name,
+          service_note: body.note,
+          service_date: body.service_date,
+          speaker_language: body.speaker_language,
+          translation_language: body.translation_language,
+          voice: body.tts_enabled
+        };
+        document.querySelector("#service-title").textContent = body.name;
+        document.title = `${snapshot.status === "live" ? "● " : ""}${body.name} · voiceofgod`;
+        setLanguage(body.speaker_language, body.translation_language);
+        document.querySelector("#voice").checked = Boolean(body.tts_enabled);
+        document.querySelector("#edit-dialog").close();
+        UI.toast("Service saved.", "success");
+      } catch (err) {
+        editError.textContent = err.message;
+      } finally {
+        UI.busy(save, false);
+      }
+    });
+
+    document.querySelector("#youtube-pause").addEventListener("click", async () => {
+      player.stop();
+      const response = await fetch(`/api/sessions/${sessionId}/youtube/pause`, { method: "POST", headers });
+      const body = await response.json();
+      if (!response.ok) {
+        UI.toast(body.detail || "Could not pause the video.", "error");
+        return;
+      }
+      snapshot = { ...snapshot, status: "paused" };
+      setStatus("paused");
+      paintYoutube(body);
+    });
+
+    document.querySelector("#youtube-resume").addEventListener("click", async () => {
+      if (youtubeHear.checked) player.unlock();
+      const response = await fetch(`/api/sessions/${sessionId}/youtube/resume`, { method: "POST", headers });
+      const body = await response.json();
+      if (!response.ok) {
+        UI.toast(body.detail || "Could not start the video.", "error");
+        return;
+      }
+      snapshot = { ...snapshot, status: "live" };
+      setStatus("live");
+      paintYoutube(body);
+    });
 
     const youtubeRange = document.querySelector("#youtube-range");
     youtubeRange.addEventListener("pointerdown", () => { youtubeDrag = true; });

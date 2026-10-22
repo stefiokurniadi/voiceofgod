@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, Response
 import segno
 
 from app.accounts import COOKIE, AuthError, CHURCH_NOTE, cookie_token
+from app.stt import GoogleRecognizer, WhisperRecognizer
 from app.captions import lines_after, project_session
 from app.director import token_matches
 from app.export import render_srt, render_txt
@@ -36,8 +37,11 @@ def _event_for(event: dict, role: str) -> dict:
         "line": project_line(event.get("line"), role, tombstone=True) if event.get("line") else None,
         "provisional": project_line(event.get("provisional"), role, tombstone=True) if event.get("provisional") else None,
     }
+    projected["service_name"] = event.get("service_name") or ""
     if role == "operator":
         projected["metrics"] = event.get("metrics") or {}
+        projected["service_note"] = event.get("service_note") or ""
+        projected["service_date"] = event.get("service_date") or ""
     return projected
 
 
@@ -170,7 +174,7 @@ async def login(request: Request):
     except AuthError as exc:
         raise HTTPException(401, str(exc)) from exc
     user = await request.app.state.accounts.user_from_token(token)
-    response = JSONResponse(_me(user))
+    response = JSONResponse(_me(user, request))
     _login_cookie(response, token, request.app.state.settings)
     return response
 
@@ -186,10 +190,33 @@ async def logout(request: Request):
 @router.get("/api/me")
 async def me(request: Request):
     user = await _require_user(request)
-    return _me(user)
+    return _me(user, request)
 
 
-def _me(user: dict) -> dict:
+def _standard_label(recognizer) -> str:
+    if isinstance(recognizer, GoogleRecognizer):
+        return "Google"
+    if isinstance(recognizer, WhisperRecognizer):
+        return "Whisper"
+    return "Standard"
+
+
+def _providers(request: Request) -> dict:
+    recognizers = getattr(request.app.state, "recognizers", None) or {}
+    speakers = getattr(request.app.state, "speakers", None) or {}
+    return {
+        "stt": [
+            {"id": "default", "label": _standard_label(request.app.state.recognizer), "available": True},
+            {"id": "soniox", "label": "Soniox", "available": "soniox" in recognizers},
+        ],
+        "tts": [
+            {"id": "google", "label": "Google WaveNet", "available": True},
+            {"id": "soniox", "label": "Soniox", "available": "soniox" in speakers},
+        ],
+    }
+
+
+def _me(user: dict, request: Request) -> dict:
     return {
         "username": user["username"],
         "role": user["role"],
@@ -200,6 +227,9 @@ def _me(user: dict) -> dict:
         "speaker_language": user["speaker_language"],
         "translation_language": user.get("translation_language") or "id",
         "tts_enabled": user["tts_enabled"],
+        "stt_provider": user.get("stt_provider") or "default",
+        "tts_provider": user.get("tts_provider") or "google",
+        "providers": _providers(request),
         "church_template": CHURCH_NOTE,
     }
 
@@ -218,13 +248,13 @@ async def onboarding(request: Request):
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     await request.app.state.director.apply_church(saved["church_id"], saved["church_name"], saved["church_note"])
-    return _me(saved)
+    return _me(saved, request)
 
 
 @router.get("/api/settings")
 async def get_settings(request: Request):
     user = await _require_user(request)
-    return _me(user)
+    return _me(user, request)
 
 
 @router.put("/api/settings")
@@ -234,10 +264,18 @@ async def put_settings(request: Request):
     language = body.get("speaker_language", user["speaker_language"])
     enabled = body.get("tts_enabled", user["tts_enabled"])
     caption = body.get("translation_language", user.get("translation_language") or "id")
+    stt_provider = body.get("stt_provider", user.get("stt_provider") or "default")
+    tts_provider = body.get("tts_provider", user.get("tts_provider") or "google")
     if not isinstance(enabled, bool):
         raise HTTPException(400, "Spoken translation must be on or off.")
+    if "stt_provider" in body and stt_provider == "soniox" and "soniox" not in request.app.state.recognizers:
+        raise HTTPException(400, "Soniox needs an API key on this server.")
+    if "tts_provider" in body and tts_provider == "soniox" and "soniox" not in request.app.state.speakers:
+        raise HTTPException(400, "Soniox needs an API key on this server.")
     try:
-        saved = await request.app.state.accounts.save_preferences(user["id"], language, enabled, caption)
+        saved = await request.app.state.accounts.save_preferences(
+            user["id"], language, enabled, caption, stt_provider, tts_provider
+        )
         if "name" in body or "note" in body or "keep_names" in body:
             saved = await request.app.state.accounts.save_church(
                 user["id"],
@@ -248,7 +286,7 @@ async def put_settings(request: Request):
             await request.app.state.director.apply_church(saved["church_id"], saved["church_name"], saved["church_note"])
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    return _me(saved)
+    return _me(saved, request)
 
 
 @router.get("/api/admin/youtube")
@@ -275,6 +313,30 @@ async def admin_youtube_start(request: Request):
         status = 503 if "not ready" in text else 409
         raise HTTPException(status, text) from exc
     return created
+
+
+@router.post("/api/admin/youtube/pause")
+async def admin_youtube_pause(request: Request):
+    await _require_admin(request)
+    try:
+        await request.app.state.director.pause_youtube_test()
+    except KeyError:
+        raise HTTPException(404, "No YouTube test is running.") from None
+    return request.app.state.director.youtube_view(_base_url(request))
+
+
+@router.post("/api/admin/youtube/resume")
+async def admin_youtube_resume(request: Request):
+    await _require_admin(request)
+    try:
+        await request.app.state.director.resume_youtube_test()
+    except KeyError:
+        raise HTTPException(404, "No YouTube test is running.") from None
+    except RuntimeError as exc:
+        text = str(exc)
+        status = 503 if "not ready" in text else 409
+        raise HTTPException(status, text) from exc
+    return request.app.state.director.youtube_view(_base_url(request))
 
 
 @router.post("/api/admin/youtube/stop")
@@ -394,6 +456,29 @@ async def create_session(request: Request):
     except RuntimeError as exc:
         raise HTTPException(503, str(exc)) from exc
     return created
+
+
+@router.put("/api/sessions/{session_id}")
+async def update_session(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    body = await request.json()
+    voice = body.get("tts_enabled")
+    if not isinstance(voice, bool):
+        raise HTTPException(400, "Spoken translation must be on or off.")
+    try:
+        return await request.app.state.director.update_session(
+            session_id,
+            str(body.get("name") or ""),
+            str(body.get("note") or ""),
+            _service_date(body.get("service_date")),
+            body.get("speaker_language") or "",
+            voice,
+            body.get("translation_language"),
+        )
+    except KeyError:
+        raise HTTPException(404, "Session not found.") from None
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
 
 
 @router.post("/api/sessions/{session_id}/start")
@@ -550,6 +635,30 @@ async def test_propresenter(session_id: str, request: Request):
     finally:
         await client.aclose()
     return {"ok": True, "id": message_id}
+
+
+@router.post("/api/sessions/{session_id}/youtube/pause")
+async def session_youtube_pause(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    try:
+        await request.app.state.director.pause_youtube_test(session_id)
+    except KeyError:
+        raise HTTPException(404, "No YouTube test is running.") from None
+    pipeline = request.app.state.director.pipeline(session_id)
+    return request.app.state.director.youtube_position(pipeline) if pipeline else {}
+
+
+@router.post("/api/sessions/{session_id}/youtube/resume")
+async def session_youtube_resume(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    try:
+        return await request.app.state.director.resume_youtube_test(session_id)
+    except KeyError:
+        raise HTTPException(404, "No YouTube test is running.") from None
+    except RuntimeError as exc:
+        text = str(exc)
+        status = 503 if "not ready" in text else 409
+        raise HTTPException(status, text) from exc
 
 
 @router.post("/api/sessions/{session_id}/youtube/seek")

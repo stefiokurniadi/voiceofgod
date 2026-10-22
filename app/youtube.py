@@ -17,6 +17,7 @@ from app.rtmp import consume_pcm
 logger = logging.getLogger(__name__)
 
 WAITING = "Waiting for the YouTube audio."
+LOADING = "Loading the YouTube video."
 ENDED = "The YouTube video ended."
 FAILED = "The YouTube audio could not be opened."
 UNAVAILABLE = "YouTube ingest is unavailable."
@@ -70,7 +71,19 @@ def _has_video(host: str, path: str, query: str) -> bool:
 
 
 def ffmpeg_command(media_url: str, live: bool, offset: float = 0.0) -> list[str]:
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin"]
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+        "-reconnect",
+        "1",
+        "-reconnect_streamed",
+        "1",
+        "-reconnect_delay_max",
+        "5",
+    ]
     if not live and offset > 0:
         command.extend(["-ss", f"{offset:.3f}"])
     if not live:
@@ -193,6 +206,14 @@ class YouTubeIngest:
             await self._kill(session_id)
 
     async def _pull(self, session_id: str, pipeline) -> bool:
+        pipeline.youtube_loading = True
+        try:
+            return await self._pull_loaded(session_id, pipeline)
+        finally:
+            pipeline.youtube_loading = False
+
+    async def _pull_loaded(self, session_id: str, pipeline) -> bool:
+        await pipeline._set_status(pipeline.doc.get("status") or "live", LOADING)
         page = check_youtube_url(str(pipeline.doc.get("youtube_url") or ""))
         media = self.media.get(session_id)
         if media is None:

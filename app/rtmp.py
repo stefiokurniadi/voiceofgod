@@ -109,7 +109,7 @@ async def consume_pcm(read, accept, level=None, buffer: PcmBuffer | None = None)
     buffer = buffer or PcmBuffer()
     saw_audio = False
     while True:
-        data = await read(8192)
+        data = await read(CHUNK_BYTES)
         if not data:
             return saw_audio
         buffer.extend(data)

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import time
+
 import numpy as np
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -207,6 +210,79 @@ def test_a_bad_translation_does_not_change_what_was_said():
         keep,
     ) == "Tuhan, terima kasih atas gereja ini."
     assert finish_translation("Jesus is Lord.", "Yesus adalah Tuhan.", keep) == "Yesus adalah Tuhan."
+
+
+class _RecordingTranslator:
+    def __init__(self, delay: float = 0.0, slow_first: float = 0.0):
+        self.calls: list[str] = []
+        self.delay = delay
+        self.slow_first = slow_first
+        self.started = asyncio.Event()
+
+    async def translate(self, request):
+        self.calls.append(request.text)
+        if self.slow_first and len(self.calls) == 1:
+            self.started.set()
+            await asyncio.sleep(self.slow_first)
+        elif self.delay:
+            await asyncio.sleep(self.delay)
+        return "Halo", []
+
+
+def _translated(words: list[str], translator, config: PipelineConfig | None = None):
+    glossary = Glossary.load(GLOSSARY_PATH)
+    return SessionPipeline(
+        document(),
+        MemoryRepository(),
+        ScriptedRecognizer(words),
+        translator,
+        glossary,
+        config or FAST,
+    )
+
+
+@pytest.mark.asyncio
+async def test_ending_a_sentence_does_not_stop_the_audio_intake():
+    config = PipelineConfig(**{**FAST.__dict__, "translate_timeout_seconds": 3.0})
+    pipe = _translated(["Hello", "church", "this", "morning"], _RecordingTranslator(delay=1.0), config)
+    await pipe.start()
+    await feed(pipe, 1.0, 0.25)
+    await pipe.accept_pcm(pcm(0.2, 0.0))
+    started = time.monotonic()
+    await pipe.accept_pcm(pcm(0.2, 0.0))
+    assert time.monotonic() - started < 0.2
+    await pipe.idle()
+    assert pipe.doc["lines"]
+    assert pipe.doc["lines"][0]["translation"]
+
+
+@pytest.mark.asyncio
+async def test_a_slower_translation_still_keeps_the_spoken_order():
+    translator = _RecordingTranslator(slow_first=0.6)
+    config = PipelineConfig(**{**FAST.__dict__, "translate_timeout_seconds": 3.0})
+    pipe = _translated(["Hello", "church", "this", "morning"], translator, config)
+    await pipe.start()
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await asyncio.wait_for(translator.started.wait(), timeout=2)
+    pipe.recognizer.words = ["Second", "sentence", "starts", "now"]
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    originals = [line["original"] for line in pipe.doc["lines"] if line.get("state") == "final"]
+    assert originals == translator.calls
+    assert "Hello" in originals[0]
+    assert "Second" in originals[1]
+
+
+@pytest.mark.asyncio
+async def test_only_a_finished_line_is_translated():
+    translator = _RecordingTranslator()
+    pipe = _translated(["Hello", "church", "this", "morning"], translator)
+    await speak(pipe)
+    finals = [line["original"] for line in pipe.doc["lines"] if line.get("state") == "final"]
+    assert translator.calls == finals
+    assert len(translator.calls) == 1
 
 
 @pytest.mark.asyncio

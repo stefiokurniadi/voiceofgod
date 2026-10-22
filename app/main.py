@@ -17,11 +17,15 @@ from app.glossary import Glossary
 from app.paths import GLOSSARY_PATH, STATIC_DIR
 from app.pipeline import PipelineConfig
 from app.store import MemoryRepository, RedisRepository
-from app.stt import GoogleRecognizer, ScriptedRecognizer, WhisperRecognizer
+from app.stt import GoogleRecognizer, ScriptedRecognizer, SonioxRecognizer, WhisperRecognizer
 from app.translator import GeminiTranslator, GlossaryTranslator, UnavailableTranslator, VllmTranslator
-from app.tts import GoogleSpeaker
+from app.tts import GoogleSpeaker, SonioxSpeaker
 
 logger = logging.getLogger("voiceofgod")
+
+
+def _configured(value: str) -> str:
+    return (value or "").strip()
 
 
 def build_recognizer(settings: Settings):
@@ -45,6 +49,14 @@ def build_recognizer(settings: Settings):
     )
 
 
+def build_recognizers(settings: Settings) -> dict:
+    recognizers = {"default": build_recognizer(settings)}
+    key = _configured(settings.soniox_api_key)
+    if key:
+        recognizers["soniox"] = SonioxRecognizer(key, settings.soniox_stt_model)
+    return recognizers
+
+
 def build_translator(settings: Settings):
     if settings.gemini_api_key:
         return GeminiTranslator(settings.gemini_api_key, settings.gemini_model)
@@ -56,9 +68,50 @@ def build_translator(settings: Settings):
 
 
 def build_speaker(settings: Settings):
-    if not settings.google_api_key:
+    if not _configured(settings.google_api_key):
         return None
     return GoogleSpeaker(settings.google_api_key, settings.tts_voice_en, settings.tts_voice_id)
+
+
+def build_speakers(settings: Settings, speaker=None) -> tuple[object | None, dict]:
+    """The injected speaker stays the Google voice. Soniox is added when its key is set."""
+    speakers: dict = {}
+    if speaker is not None:
+        speakers["google"] = speaker
+    elif _configured(settings.google_api_key):
+        speaker = build_speaker(settings)
+        speakers["google"] = speaker
+    key = _configured(settings.soniox_api_key)
+    if key:
+        speakers["soniox"] = SonioxSpeaker(
+            key,
+            settings.soniox_tts_model,
+            settings.soniox_voice_en,
+            settings.soniox_voice_id,
+        )
+    return speaker, speakers
+
+
+async def _close_speakers(speakers: dict, primary) -> None:
+    seen: set[int] = set()
+    for speaker in list(speakers.values()) + [primary]:
+        if speaker is None or id(speaker) in seen:
+            continue
+        seen.add(id(speaker))
+        closer = getattr(speaker, "aclose", None)
+        if closer:
+            await closer()
+
+
+def _close_recognizers(recognizers: dict, primary) -> None:
+    seen: set[int] = set()
+    for recognizer in list(recognizers.values()) + [primary]:
+        if recognizer is None or id(recognizer) in seen:
+            continue
+        seen.add(id(recognizer))
+        closer = getattr(recognizer, "close", None)
+        if closer:
+            closer()
 
 
 def build_repository(settings: Settings):
@@ -77,6 +130,8 @@ def create_app(
     recognizer=None,
     translator=None,
     speaker=None,
+    recognizers=None,
+    speakers=None,
     pipeline_config=None,
     database: Database | None = None,
     accounts: Accounts | None = None,
@@ -86,10 +141,22 @@ def create_app(
     database = database if database is not None else Database(settings.database_url)
     accounts = accounts if accounts is not None else Accounts(database, settings)
     repository = repository if repository is not None else build_repository(settings)
-    recognizer = recognizer if recognizer is not None else build_recognizer(settings)
+    if recognizers is None:
+        if recognizer is None:
+            recognizers = build_recognizers(settings)
+            recognizer = recognizers["default"]
+        else:
+            recognizers = {"default": recognizer}
+            key = _configured(settings.soniox_api_key)
+            if key:
+                recognizers["soniox"] = SonioxRecognizer(key, settings.soniox_stt_model)
+    elif recognizer is None:
+        recognizer = recognizers.get("default")
     translator = translator if translator is not None else build_translator(settings)
-    if speaker is None and settings.google_api_key:
-        speaker = build_speaker(settings)
+    if speakers is None:
+        speaker, speakers = build_speakers(settings, speaker)
+    elif speaker is None:
+        speaker = speakers.get("google")
     if pipeline_config is None and settings.gemini_api_key:
         pipeline_config = PipelineConfig(translate_timeout_seconds=max(settings.translate_timeout_seconds, 8.0))
 
@@ -104,12 +171,8 @@ def create_app(
         closer = getattr(app.state.translator, "aclose", None)
         if closer:
             await closer()
-        speaker_closer = getattr(app.state.speaker, "aclose", None)
-        if speaker_closer:
-            await speaker_closer()
-        recognizer_closer = getattr(app.state.recognizer, "close", None)
-        if recognizer_closer:
-            recognizer_closer()
+        await _close_speakers(app.state.speakers, app.state.speaker)
+        _close_recognizers(app.state.recognizers, app.state.recognizer)
         await app.state.repository.close()
         await app.state.database.close()
 
@@ -117,11 +180,24 @@ def create_app(
     app.state.settings = settings
     app.state.repository = repository
     app.state.recognizer = recognizer
+    app.state.recognizers = recognizers
     app.state.translator = translator
     app.state.speaker = speaker
+    app.state.speakers = speakers
     app.state.database = database
     app.state.accounts = accounts
-    app.state.director = Director(settings, repository, recognizer, translator, glossary, pipeline_config, speaker, accounts)
+    app.state.director = Director(
+        settings,
+        repository,
+        recognizer,
+        translator,
+        glossary,
+        pipeline_config,
+        speaker,
+        accounts,
+        recognizers,
+        speakers,
+    )
     app.include_router(router)
 
     @app.exception_handler(HTTPException)
@@ -184,6 +260,15 @@ def create_app(
         if user["role"] != "admin":
             return RedirectResponse("/", status_code=303)
         return FileResponse(STATIC_DIR / "admin.html")
+
+    @app.get("/simulation")
+    async def simulation_page(request: Request):
+        user = await _page_user(request)
+        if user is None:
+            return RedirectResponse("/login", status_code=303)
+        if user["role"] != "admin":
+            return RedirectResponse("/", status_code=303)
+        return FileResponse(STATIC_DIR / "simulation.html")
 
     @app.get("/o/{session_id}")
     async def operator_page(session_id: str, request: Request):

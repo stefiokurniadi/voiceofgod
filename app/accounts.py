@@ -102,11 +102,14 @@ def _public_user(row) -> dict:
         "speaker_language": row["speaker_language"],
         "translation_language": row["translation_language"] if "translation_language" in row else "id",
         "tts_enabled": bool(row["tts_enabled"]),
+        "stt_provider": row["stt_provider"] if "stt_provider" in row and row["stt_provider"] else "default",
+        "tts_provider": row["tts_provider"] if "tts_provider" in row and row["tts_provider"] else "google",
     }
 
 
 _USER_SQL = """
     SELECT u.id, u.username, u.role, u.disabled, u.church_id, u.speaker_language, u.translation_language, u.tts_enabled,
+           u.stt_provider, u.tts_provider,
            c.name AS church_name, c.note AS church_note, c.keep_names
     FROM users u
     LEFT JOIN churches c ON c.id = u.church_id
@@ -294,6 +297,8 @@ class Accounts:
         speaker_language: str,
         tts_enabled: bool,
         translation_language: str = "id",
+        stt_provider: str = "default",
+        tts_provider: str = "google",
     ) -> dict:
         from app.translator import SPEAKER_LANGUAGES, SPEAKER_LANGUAGE_ERROR
 
@@ -301,12 +306,23 @@ class Accounts:
             raise ValueError(SPEAKER_LANGUAGE_ERROR)
         if translation_language not in {"en", "id"}:
             raise ValueError("Listeners read English or Bahasa Indonesia.")
+        if stt_provider not in {"default", "soniox"}:
+            raise ValueError("Speech recognition must be Standard or Soniox.")
+        if tts_provider not in {"google", "soniox"}:
+            raise ValueError("The spoken voice must be Google WaveNet or Soniox.")
         await self.db.execute(
-            "UPDATE users SET speaker_language = $2, tts_enabled = $3, translation_language = $4 WHERE id = $1",
+            """
+            UPDATE users
+            SET speaker_language = $2, tts_enabled = $3, translation_language = $4,
+                stt_provider = $5, tts_provider = $6
+            WHERE id = $1
+            """,
             user_id,
             speaker_language,
             bool(tts_enabled),
             translation_language,
+            stt_provider,
+            tts_provider,
         )
         return await self.user_by_id(user_id)
 
@@ -348,10 +364,18 @@ class Accounts:
         from app.translator import target_language
 
         speaker = document.get("speaker_language") or "en"
+        raw_date = str(document.get("service_date") or "").strip()
+        service_date = None
+        if raw_date:
+            try:
+                service_date = date.fromisoformat(raw_date)
+            except ValueError:
+                service_date = None
         await self.db.execute(
             """
             UPDATE services
-            SET document = $2, status = $3, speaker_language = $4, voice = $5, translation_language = $6
+            SET document = $2, status = $3, speaker_language = $4, voice = $5, translation_language = $6,
+                name = $7, note = $8, service_date = $9
             WHERE id = $1
             """,
             service_id,
@@ -360,6 +384,9 @@ class Accounts:
             speaker,
             bool(document.get("voice")),
             target_language(speaker, document.get("translation_language")),
+            str(document.get("service_name") or "").strip() or "Service",
+            str(document.get("service_note") or ""),
+            service_date,
         )
 
     async def load_service(self, service_id: str):

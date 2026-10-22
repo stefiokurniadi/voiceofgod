@@ -174,10 +174,15 @@ async def test_one_church_cannot_control_another_churchs_service():
             listed = await other.get("/api/services")
             stolen = await other.get(f"/api/sessions/{session_id}")
             started = await other.post(f"/api/sessions/{session_id}/start")
+            edited = await other.put(
+                f"/api/sessions/{session_id}",
+                json={"name": "Taken", "speaker_language": "en", "tts_enabled": False},
+            )
         owned = await admin.get("/api/services")
     assert listed.json()["services"] == []
     assert stolen.status_code == 401
     assert started.status_code == 401
+    assert edited.status_code == 401
     assert owned.json()["services"][0]["id"] == session_id
 
 
@@ -221,6 +226,59 @@ async def test_a_saved_service_reopens_after_the_pipelines_are_gone():
     assert operator.json()["status"] == "paused"
     assert "restarted" in operator.json()["banner"]
     assert captions.json()["lines"][0]["original"] == original
+
+
+@pytest.mark.asyncio
+async def test_a_service_can_be_edited_after_it_is_created():
+    app = await make_app([])
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await sign_in(client)
+        created = await client.post(
+            "/api/sessions",
+            json={
+                "speaker_language": "en",
+                "name": "Sunday morning",
+                "note": "Preacher: Sarah",
+                "service_date": "2026-10-19",
+                "tts_enabled": False,
+            },
+        )
+        assert created.status_code == 200
+        session_id = created.json()["id"]
+        saved = await client.put(
+            f"/api/sessions/{session_id}",
+            json={
+                "name": "Evening prayer",
+                "note": "Preacher: Ana",
+                "service_date": "2026-10-25",
+                "speaker_language": "mix",
+                "translation_language": "en",
+                "tts_enabled": True,
+            },
+        )
+        assert saved.status_code == 200, saved.text
+        listed = await client.get("/api/services")
+        operator = await client.get(f"/api/sessions/{session_id}")
+        listener = await client.get(f"/api/sessions/{session_id}/captions")
+        blank = await client.put(
+            f"/api/sessions/{session_id}",
+            json={"name": "  ", "speaker_language": "en", "tts_enabled": False},
+        )
+    assert saved.json()["name"] == "Evening prayer"
+    assert saved.json()["translation_language"] == "en"
+    service = listed.json()["services"][0]
+    assert service["name"] == "Evening prayer"
+    assert service["note"] == "Preacher: Ana"
+    assert service["service_date"] == "2026-10-25"
+    assert service["speaker_language"] == "mix"
+    assert service["translation_language"] == "en"
+    assert service["tts_enabled"] is True
+    assert operator.json()["service_name"] == "Evening prayer"
+    assert operator.json()["service_note"] == "Preacher: Ana"
+    assert operator.json()["service_date"] == "2026-10-25"
+    assert listener.json()["service_name"] == "Evening prayer"
+    assert "service_note" not in listener.json()
+    assert blank.status_code == 400
 
 
 @pytest.mark.asyncio

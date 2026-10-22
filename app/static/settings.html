@@ -67,6 +67,22 @@
           </div>
         </div>
         <div class="field">
+          <span class="label" id="stt-label">Speech recognition</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="stt-label">
+            <label><input type="radio" name="stt" value="default" checked><span id="stt-default-label">Standard</span></label>
+            <label><input type="radio" name="stt" value="soniox"><span>Soniox</span></label>
+          </div>
+          <p class="hint" id="stt-hint" hidden>Soniox needs an API key on this server.</p>
+        </div>
+        <div class="field">
+          <span class="label" id="voice-label">Spoken voice</span>
+          <div class="segmented" role="radiogroup" aria-labelledby="voice-label">
+            <label><input type="radio" name="voice" value="google" checked><span>Google WaveNet</span></label>
+            <label><input type="radio" name="voice" value="soniox"><span>Soniox</span></label>
+          </div>
+          <p class="hint" id="voice-hint" hidden>Soniox needs an API key on this server.</p>
+        </div>
+        <div class="field">
           <label class="switch">
             <input type="checkbox" id="tts" role="switch">
             <span class="switch-track" aria-hidden="true"></span>
@@ -97,6 +113,33 @@
       document.querySelector(`input[name=caption][value="${caption}"]`).checked = true;
       document.querySelector("#caption-field").hidden = speaker !== "mix";
       document.querySelector("#tts").checked = Boolean(profile.tts_enabled);
+      const providers = profile.providers || {};
+      const standard = (providers.stt || []).find((option) => option.id === "default");
+      document.querySelector("#stt-default-label").textContent = (standard && standard.label) || "Standard";
+      choose("stt", profile.stt_provider || "default", providers.stt || []);
+      choose("voice", profile.tts_provider || "google", providers.tts || []);
+      showHint("#stt-hint", providers.stt || []);
+      showHint("#voice-hint", providers.tts || []);
+    }
+
+    function choose(name, selected, options) {
+      const available = {};
+      for (const option of options) available[option.id] = option.available !== false;
+      const inputs = [...document.querySelectorAll(`input[name="${name}"]`)];
+      for (const input of inputs) {
+        const ok = available[input.value] !== false;
+        input.disabled = !ok;
+        if (!ok) input.checked = false;
+      }
+      const wanted = inputs.find((input) => input.value === selected && !input.disabled);
+      const fallback = inputs.find((input) => !input.disabled);
+      if (wanted) wanted.checked = true;
+      else if (fallback) fallback.checked = true;
+    }
+
+    function showHint(id, options) {
+      const soniox = options.find((option) => option.id === "soniox");
+      document.querySelector(id).hidden = !soniox || soniox.available !== false;
     }
 
     async function save(button, body, message) {
@@ -133,7 +176,9 @@
       save(document.querySelector("#defaults-save"), {
         speaker_language: document.querySelector("input[name=language]:checked").value,
         translation_language: document.querySelector("input[name=caption]:checked").value,
-        tts_enabled: document.querySelector("#tts").checked
+        tts_enabled: document.querySelector("#tts").checked,
+        stt_provider: document.querySelector("input[name=stt]:checked").value,
+        tts_provider: document.querySelector("input[name=voice]:checked").value
       }, "Defaults saved");
     });
 

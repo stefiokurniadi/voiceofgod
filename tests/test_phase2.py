@@ -57,6 +57,42 @@ def test_a_missing_session_tells_the_page_to_stop_reconnecting():
             assert socket.receive_json()["type"] == "deleted"
 
 
+def test_listeners_hear_the_sentence_grow_and_read_the_finished_translation():
+    from app.captions import project_line
+
+    growing = project_line(
+        {
+            "id": "L1",
+            "state": "provisional",
+            "original": "Hello church",
+            "translation": "Halo jemaat",
+            "settled": 1,
+            "hidden": False,
+            "suppressed": False,
+        },
+        "listener",
+    )
+    assert growing["original"] == "Hello church"
+    assert growing["translation"] == ""
+    assert growing["settled"] == 1
+    finished = project_line({**growing, "state": "final", "translation": "Halo jemaat"}, "listener")
+    assert finished["translation"] == "Halo jemaat"
+    reading = project_line(
+        {
+            "id": "L2",
+            "state": "provisional",
+            "original": "In the beginning",
+            "translation": "Pada mulanya",
+            "suppressed": True,
+            "listener_original": "John 1:1 — Scripture is being read",
+            "listener_translation": "Yohanes 1:1 — Firman sedang dibacakan",
+            "hidden": False,
+        },
+        "listener",
+    )
+    assert "Firman" in reading["translation"]
+
+
 def test_lines_after_an_acknowledged_caption():
     lines = [{"id": "L00001"}, {"id": "L00002"}]
     assert lines_after(lines, None) == lines

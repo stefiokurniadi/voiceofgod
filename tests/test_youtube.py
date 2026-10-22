@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from starlette.testclient import TestClient
 
-from app.youtube import ENDED, FAILED, UNAVAILABLE, Media, check_youtube_url, ffmpeg_command, parse_media
+from app.youtube import ENDED, FAILED, LOADING, UNAVAILABLE, WAITING, Media, YouTubeIngest, check_youtube_url, ffmpeg_command, parse_media
 from tests.church import make_app, sign_in, sign_in_sync
 from tests.test_phase1 import pcm, pipeline_for
 from tests.test_phase2 import app_for
@@ -57,6 +58,11 @@ def test_a_recorded_video_is_read_in_real_time():
     assert jumped.index("-ss") < jumped.index("-i")
     assert jumped[jumped.index("-ss") + 1] == "12.000"
     assert recorded[recorded.index("-ar") + 1] == "16000"
+    reconnect = ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+    assert recorded[recorded.index("-reconnect"):recorded.index("-reconnect") + 6] == reconnect
+    assert recorded.index("-reconnect") < recorded.index("-re")
+    assert jumped.index("-reconnect_delay_max") < jumped.index("-ss")
+    assert live.index("-reconnect") < live.index("-i")
 
 
 def test_media_json_keeps_an_https_audio_address():
@@ -300,3 +306,92 @@ async def test_youtube_audio_is_offered_for_playback():
     other = quiet.attach_monitor()
     await quiet.accept_pcm(chunk)
     assert other.empty()
+
+
+@pytest.mark.asyncio
+async def test_pause_holds_the_place_and_start_continues(monkeypatch):
+    monkeypatch.setattr("app.director.youtube_ready", lambda: True)
+    app = await make_app([])
+    proc = _Proc([], hang=True)
+    commands = []
+
+    async def resolve(_url):
+        return Media("https://rr.example/audio", False, 90)
+
+    async def spawn(command):
+        commands.append(list(command))
+        return proc if len(commands) == 1 else _Proc([pcm(0.1, 0.0)])
+
+    app.state.director.youtube.resolve = resolve
+    app.state.director.youtube.spawn = spawn
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        await sign_in(client, onboard=False)
+        missing = await client.post("/api/admin/youtube/pause")
+        assert missing.status_code == 404
+        created = await client.post("/api/admin/youtube", json={"url": WATCH, "speaker_language": "en"})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        await asyncio.wait_for(proc.started.wait(), timeout=2)
+        pipe = app.state.director.pipeline(body["id"])
+        pipe.youtube_played = 12
+        paused = await client.post("/api/admin/youtube/pause")
+        assert paused.status_code == 200, paused.text
+        assert paused.json()["paused"] is True
+        assert paused.json()["status"] == "paused"
+        assert paused.json()["position"] == 12
+        assert pipe.doc["youtube_offset"] == 12
+        await pipe.accept_pcm(pcm(0.2, 0.2))
+        assert pipe.youtube_played == 0
+        started = await client.post("/api/admin/youtube/resume")
+        assert started.status_code == 200, started.text
+        assert started.json()["paused"] is False
+        assert started.json()["status"] == "live"
+        for _ in range(50):
+            if len(commands) >= 2:
+                break
+            await asyncio.sleep(0.05)
+    assert commands[-1].index("-ss") < commands[-1].index("-i")
+    assert "12.000" in commands[-1]
+    assert pipe.doc["youtube_paused"] is False
+
+
+@pytest.mark.asyncio
+async def test_loading_a_youtube_video_is_not_a_stall():
+    pipe = pipeline_for([])
+    pipe.doc["input"] = "youtube"
+    pipe.doc["youtube_url"] = WATCH
+    pipe.config.capture_stall_seconds = 0.2
+    await pipe.start()
+    pipe.youtube_loading = True
+    pipe.last_audio_at = time.monotonic() - 5
+    await asyncio.sleep(1.0)
+    assert pipe.doc["status"] == "live"
+    assert pipe.doc["banner"] != WAITING
+
+    seen = {}
+
+    class _Director:
+        def pipeline(self, session_id):
+            del session_id
+            return pipe
+
+    ingest = YouTubeIngest(_Director())
+
+    async def resolve(_url):
+        seen["loading"] = pipe.youtube_loading
+        seen["banner"] = pipe.doc["banner"]
+        return Media("https://rr.example/audio", False)
+
+    async def spawn(_command):
+        return _Proc([pcm(0.2, 0.0)])
+
+    ingest.resolve = resolve
+    ingest.spawn = spawn
+    await ingest._pull(pipe.doc["id"], pipe)
+    assert seen == {"loading": True, "banner": LOADING}
+    assert pipe.youtube_loading is False
+    assert pipe.doc["banner"] != LOADING
+    pipe.last_audio_at = time.monotonic() - 5
+    await asyncio.sleep(1.0)
+    assert pipe.doc["banner"] == WAITING
+    await pipe.stop()

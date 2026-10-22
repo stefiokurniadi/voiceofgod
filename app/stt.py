@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import base64
 import inspect
+import json
 import logging
 import threading
 
@@ -333,7 +334,10 @@ class GoogleRecognizer:
         self.credentials_path = credentials_path or ""
         self.token_provider = token_provider
         self.loaded = True
-        self._client = client or httpx.Client(timeout=timeout)
+        self._client = client or httpx.Client(
+            timeout=timeout,
+            limits=httpx.Limits(max_connections=16, max_keepalive_connections=8),
+        )
         self._owns_client = client is None
         self._lock = threading.Lock()
         self._credentials = None
@@ -429,3 +433,131 @@ class GoogleRecognizer:
         response.raise_for_status()
         duration = len(samples) / SAMPLE_RATE
         return Transcript(_words_from_google(response.json(), duration))
+
+
+SONIOX_STT_URL = "wss://stt-rt.soniox.com/transcribe-websocket"
+
+
+def soniox_language_hints(language: str) -> list[str]:
+    """Soniox takes short language codes. Mixed stays inside Indonesian and English."""
+    if language == "id":
+        return ["id"]
+    if language == "mix":
+        return ["id", "en"]
+    return ["en"]
+
+
+def soniox_request(model: str, language: str, hotwords: str | None) -> dict:
+    """One real-time Soniox config for a raw 16 kHz clip."""
+    config = {
+        "model": model or "stt-rt-v5",
+        "audio_format": "pcm_s16le",
+        "sample_rate": SAMPLE_RATE,
+        "num_channels": 1,
+        "language_hints": soniox_language_hints(language),
+    }
+    phrases = speech_phrases(hotwords)
+    if phrases:
+        config["context"] = {"terms": phrases}
+    return config
+
+
+def _millis(value) -> float:
+    try:
+        return max(0.0, float(value)) / 1000.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def words_from_soniox(tokens: list[dict]) -> list[Word]:
+    """Join sub-word tokens. A token that starts with a space begins a new word."""
+    words: list[Word] = []
+    text = ""
+    start: float | None = None
+    end = 0.0
+
+    def flush() -> None:
+        nonlocal text, start, end
+        cleaned = text.strip()
+        if cleaned and start is not None:
+            words.append(Word(cleaned, start, max(end, start)))
+        text = ""
+        start = None
+
+    for token in tokens:
+        piece = token.get("text") or ""
+        if not piece:
+            continue
+        if piece[:1].isspace():
+            flush()
+            piece = piece.lstrip()
+            if not piece:
+                continue
+        token_start = _millis(token.get("start_ms"))
+        token_end = _millis(token.get("end_ms"))
+        if start is None:
+            start = token_start
+        if token_end:
+            end = token_end
+        text += piece
+    flush()
+    if words and reject_hallucination(" ".join(word.text for word in words)):
+        return []
+    return words
+
+
+class SonioxRecognizer:
+    """One Soniox real-time session per clip. Final tokens become the transcript."""
+
+    def __init__(self, api_key: str, model: str = "stt-rt-v5", timeout: float = 30.0, connect=None):
+        self.api_key = api_key
+        self.model = model or "stt-rt-v5"
+        self.timeout = timeout
+        self.connect = connect
+        self.loaded = True
+        self.billed_once = True
+        self._lock = threading.Lock()
+
+    def ensure_loaded(self) -> None:
+        self.loaded = True
+
+    def close(self) -> None:
+        return None
+
+    def transcribe(self, audio, language: str, hotwords: str | None = None) -> Transcript:
+        samples = np.asarray(audio if audio is not None else [], dtype=np.float32)
+        pcm = float_to_pcm16(samples)
+        if not pcm:
+            return Transcript([])
+        config = soniox_request(self.model, language, hotwords)
+        with self._lock:
+            tokens = self._transcribe_locked(pcm, config)
+        return Transcript(words_from_soniox(tokens))
+
+    def _transcribe_locked(self, pcm: bytes, config: dict) -> list[dict]:
+        connect = self.connect
+        if connect is None:
+            from websockets.sync.client import connect as default_connect
+
+            connect = default_connect
+        tokens: list[dict] = []
+        with connect(
+            SONIOX_STT_URL,
+            additional_headers={"Authorization": f"Bearer {self.api_key}"},
+            open_timeout=self.timeout,
+            close_timeout=5,
+        ) as ws:
+            ws.send(json.dumps(config))
+            ws.send(pcm)
+            ws.send(b"")
+            while True:
+                message = ws.recv(timeout=self.timeout)
+                body = json.loads(message)
+                if body.get("error_code") is not None:
+                    raise RuntimeError(f"Soniox {body.get('error_code')}: {body.get('error_message')}")
+                for token in body.get("tokens") or []:
+                    if token.get("is_final") and token.get("text"):
+                        tokens.append(token)
+                if body.get("finished"):
+                    break
+        return tokens

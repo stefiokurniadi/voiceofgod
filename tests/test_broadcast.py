@@ -65,11 +65,15 @@ async def test_pcm_chunks_reach_the_pipeline():
     await pipe.start()
     pieces = [pcm(0.1, 0.2), b""]
 
-    async def read(_size: int) -> bytes:
+    sizes = []
+
+    async def read(size: int) -> bytes:
+        sizes.append(size)
         return pieces.pop(0) if pieces else b""
 
     saw = await consume_pcm(read, pipe.accept_pcm, pipe.note_level)
     assert saw
+    assert sizes == [3200, 3200]
     assert pipe.session_time > 0
     assert pipe.input_level > 0
 
@@ -266,7 +270,15 @@ async def test_missing_ingest_is_not_announced_as_waiting_for_obs():
 
 @pytest.mark.asyncio
 async def test_rtmp_without_ingest_tells_the_operator():
-    app = await make_app(["Hello"])
+    app = await make_app(
+        ["Hello"],
+        extra_settings={
+            "rtmp_public_url": "",
+            "mediamtx_rtmp_url": "",
+            "rtmp_auth_secret": "",
+            "rtmp_read_password": "",
+        },
+    )
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
         await sign_in(client)

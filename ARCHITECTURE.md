@@ -45,7 +45,7 @@ HTTPS sits in front of port 8080. Browsers will not open the microphone on plain
 | `/` | Signed-in church | That church's services, newest first. |
 | `/login` | Operator | Sign in. There is no public signup. |
 | `/onboarding` | Signed-in user | Church name, names to keep, and the church note. |
-| `/settings` | Signed-in church | Default language, spoken translation, and the church note. |
+| `/settings` | Signed-in church | Default language, speech recognition, spoken voice, and the church note. |
 | `/admin` | Admin | Create, disable, and reset users. |
 | `/o/{session}` | That church, or the `?k` secret | Start, stop, glossary, hide and restore, metrics, QR, exports. |
 | `/l/{session}` | Listener | Captions, and Listen when voice is on. |
@@ -62,13 +62,13 @@ flowchart TD
   mic["Browser mic"]
   rtmp["OBS via MediaMTX"]
   pipe["Pipeline<br/>re-hears the phrase about every 0.6s"]
-  stt["Recognizer<br/>Whisper or Google Speech-to-Text"]
+  stt["Recognizer<br/>Whisper, Google, or Soniox"]
   grey["Grey line<br/>latest guess, still allowed to change"]
   solid["Solid line<br/>pause of about 0.9s, or 8s hold"]
   gloss["Church context<br/>glossary names stay as spoken<br/>church note is not translated"]
   tr["Translator<br/>Qwen or Gemini"]
   read["Scripture check<br/>a long reading waits for the operator"]
-  wavenet["WaveNet<br/>speaks the finished translation"]
+  wavenet["Spoken voice<br/>WaveNet or Soniox"]
   store["Valkey<br/>save, then publish one event"]
   phones["Phones and overlay<br/>grey while moving, solid when done"]
   stage["ProPresenter<br/>solid translation only"]
@@ -90,7 +90,7 @@ The grey line is one caption that is still being heard. Each new transcript repl
 
 Church context is the glossary plus the church's own notes. Glossary names, such as the church name, are masked before translation and written back unchanged. The church name, church note, service name, and service note go to the translator as background for the interpreter. That block is not part of the sentence and is not translated. The same glossary names are also given to the recognizer so it is more likely to hear them.
 
-WaveNet is Google's text-to-speech voice. It is not part of hearing the pulpit. After a line is solid, and only when spoken translation is turned on, WaveNet reads the translation aloud as an MP3. The listener taps Listen and should use headphones so the pulpit microphone cannot hear that voice. Captions still publish if a clip fails. There is no WaveNet on the local GPU path.
+The spoken voice is Google WaveNet or Soniox text-to-speech. It is not part of hearing the pulpit. After a line is solid, and only when spoken translation is turned on, that voice reads the translation aloud as an MP3. The listener taps Listen and should use headphones so the pulpit microphone cannot hear that voice. Captions still publish if a clip fails. WaveNet needs the Google key. Soniox needs its own key. A local GPU path with neither key has no spoken voice.
 
 ## Process layout
 
@@ -99,9 +99,9 @@ WaveNet is Google's text-to-speech voice. It is not part of hearing the pulpit. 
 - **Director** owns sessions, the operator token, and one `SessionPipeline` per live session. It also owns RTMP ingest and the ProPresenter stage.
 - **SessionPipeline** turns PCM into caption lines.
 - **Repository** is Valkey in production (`RedisRepository`) or an in-process stand-in when Redis is not required.
-- **Recognizer** is `WhisperRecognizer`, `GoogleRecognizer`, or a scripted fake for tests.
+- **Recognizer** is `WhisperRecognizer`, `GoogleRecognizer`, `SonioxRecognizer`, or a scripted fake for tests. A new service uses the church's saved choice.
 - **Translator** is `VllmTranslator`, `GeminiTranslator`, a glossary-only fake, or an explicit unavailable translator.
-- **Speaker** is Google WaveNet, or absent.
+- **Speaker** is Google WaveNet, Soniox, or absent. A new service uses the church's saved voice.
 
 On startup the director reloads sessions from Valkey. A restarted API comes back paused; Start continues, and listeners keep lines they already have.
 
@@ -120,11 +120,18 @@ flowchart LR
     wav["WaveNet<br/>speaks the translation"]
   end
 
+  subgraph soniox ["Soniox"]
+    sx["Speech-to-Text<br/>stt-rt-v5"]
+    sxtts["Text-to-Speech<br/>tts-rt-v2"]
+  end
+
   api["api process"] --> w
   api --> q
   api --> g
   api --> gem
   api --> wav
+  api --> sx
+  api --> sxtts
 ```
 
-Recognizer choice: a Google key and cloud project select Speech-to-Text. Otherwise Whisper, unless fake models are allowed. Translator choice: a Gemini key wins, otherwise vLLM when `VLLM_BASE_URL` is set. WaveNet is the spoken translation on that Google path: English uses `en-US-Wavenet-D`, Bahasa Indonesia uses `id-ID-Wavenet-B`. Captions still publish if a spoken clip fails.
+Recognizer choice: each church picks Standard or Soniox on Settings. Standard is Speech-to-Text when a Google key and cloud project are set, and Whisper otherwise, unless fake models are allowed. Soniox stays off until `SONIOX_API_KEY` is set. Translator choice: a Gemini key wins, otherwise vLLM when `VLLM_BASE_URL` is set. The spoken voice is chosen the same way. Google WaveNet uses `en-US-Wavenet-D` for English and `id-ID-Wavenet-B` for Bahasa Indonesia. Soniox speaks with the configured voice. Captions still publish if a spoken clip fails. A service keeps the recognizer and voice it was created with.

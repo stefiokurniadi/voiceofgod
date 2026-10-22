@@ -107,6 +107,10 @@ def project_line(data: dict | None, role: str, *, tombstone: bool = False) -> di
         projected["glossary_miss"] = data.get("glossary_miss") or []
         projected["full_original"] = data.get("original") or ""
         projected["full_translation"] = data.get("translation") or ""
+    if role == "listener" and data.get("state") == "provisional" and not suppressed:
+        projected["translation"] = ""
+    if "settled" in data:
+        projected["settled"] = max(0, int(data.get("settled") or 0))
     projected["audio"] = bool(data.get("audio"))
     return projected
 
@@ -131,6 +135,8 @@ def project_session(document: dict, role: str) -> dict:
         "provisional": project_line(document.get("provisional"), role),
     }
     if role == "operator":
+        projected["service_note"] = document.get("service_note") or ""
+        projected["service_date"] = document.get("service_date") or ""
         projected["metrics"] = document.get("metrics") or {}
         projected["development_translator"] = bool(document.get("development_translator"))
         projected["translator_ready"] = bool(document.get("translator_ready"))

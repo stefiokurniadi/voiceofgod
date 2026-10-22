@@ -217,6 +217,35 @@ async def test_voice_runs_for_a_final_line_only():
 
 
 @pytest.mark.asyncio
+async def test_the_caption_is_sent_before_the_spoken_voice_is_ready():
+    speaker = MemorySpeaker()
+    glossary = Glossary.load(GLOSSARY_PATH)
+    spoken = document()
+    spoken["voice"] = True
+    pipe = SessionPipeline(
+        spoken,
+        MemoryRepository(),
+        ScriptedRecognizer(["Hello", "church", "this", "morning."]),
+        GlossaryTranslator(),
+        glossary,
+        FAST,
+        speaker,
+    )
+    audio_flags = []
+    emit = pipe._emit
+
+    async def spy(event_type, line=None):
+        if event_type == "line" and line is not None:
+            audio_flags.append(bool(line.get("audio")))
+        await emit(event_type, line)
+
+    pipe._emit = spy
+    await speak(pipe, 1.2)
+    assert audio_flags[:2] == [False, True]
+    assert pipe.doc["lines"][0]["audio"] is True
+
+
+@pytest.mark.asyncio
 async def test_audio_route_returns_the_stored_clip():
     from tests.church import make_app, sign_in
 

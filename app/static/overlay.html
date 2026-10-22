@@ -14,7 +14,9 @@
     const sessionId = location.pathname.split("/").pop();
     const params = new URLSearchParams(location.search);
     const view = CaptionView(document.querySelector("#captions"), {
-      fieldOf: () => (params.get("lang") === "original" ? "original" : "translation")
+      fieldOf: () => (params.get("lang") === "original" ? "original" : "translation"),
+      finalsOnly: () => params.get("lang") !== "original",
+      dictate: () => params.get("lang") === "original"
     });
     const banner = document.querySelector("#banner");
     let lastLineId = "";
