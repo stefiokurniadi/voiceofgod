@@ -91,6 +91,7 @@
     let monitorSocket = null;
     const player = UI.hear();
     const youtubeHear = document.querySelector("#youtube-hear");
+    player.setEnabled(youtubeHear.checked);
     youtubeHear.addEventListener("change", () => player.setEnabled(youtubeHear.checked));
     UI.bindHearVolume(player, document.querySelector("#youtube-volume"), document.querySelector("#youtube-volume-label"));
     document.addEventListener("pointerdown", () => { if (youtubeHear.checked) player.unlock(); });

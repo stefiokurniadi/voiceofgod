@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse, Response
 import segno
 
 from app.accounts import COOKIE, AuthError, CHURCH_NOTE, cookie_token
-from app.stt import GoogleRecognizer, WhisperRecognizer
+from app.audio import clamp_input_boost
+from app.stt import GoogleRecognizer, WhisperRecognizer, speech_model_label
 from app.captions import lines_after, project_session
 from app.director import token_matches
 from app.export import render_srt, render_txt
@@ -48,6 +49,8 @@ def _event_for(event: dict, role: str) -> dict:
 def _attach_operator(payload: dict, document: dict, settings) -> None:
     token = document.get("ingest_token") or ""
     payload["input"] = document.get("input") or "browser"
+    payload["input_boost"] = clamp_input_boost(document.get("input_boost", 2))
+    payload["youtube_url"] = document.get("youtube_url") or ""
     payload["rtmp"] = {
         "available": rtmp_ready(settings),
         "server": public_server(settings),
@@ -60,7 +63,7 @@ def _attach_operator(payload: dict, document: dict, settings) -> None:
     )
 
 
-def _catchup(document: dict, role: str, after: str, settings=None) -> dict:
+def _catchup(document: dict, role: str, after: str, settings=None, recognizers=None) -> dict:
     projected = project_session(document, role)
     newer = lines_after(projected["lines"], after or None)
     if newer is None:
@@ -70,7 +73,16 @@ def _catchup(document: dict, role: str, after: str, settings=None) -> dict:
         projected["type"] = "resume" if after else "snapshot"
     if role == "operator" and settings is not None:
         _attach_operator(projected, document, settings)
+        projected["speech_model"] = _speech_model_for(document, recognizers)
     return projected
+
+
+def _speech_model_for(document: dict, recognizers) -> str:
+    if not recognizers:
+        return ""
+    name = document.get("stt_provider") or "default"
+    recognizer = recognizers.get(name) or recognizers.get("default")
+    return speech_model_label(recognizer) if recognizer is not None else ""
 
 
 def _base_url(request: Request) -> str:
@@ -193,6 +205,10 @@ async def me(request: Request):
     return _me(user, request)
 
 
+def _speech_model(request: Request, document: dict) -> str:
+    return _speech_model_for(document, request.app.state.recognizers)
+
+
 def _standard_label(recognizer) -> str:
     if isinstance(recognizer, GoogleRecognizer):
         return "Google"
@@ -276,6 +292,10 @@ async def put_settings(request: Request):
         saved = await request.app.state.accounts.save_preferences(
             user["id"], language, enabled, caption, stt_provider, tts_provider
         )
+        if saved.get("church_id"):
+            await request.app.state.director.apply_speech(
+                saved["church_id"], saved.get("stt_provider") or "default", saved.get("tts_provider") or "google"
+            )
         if "name" in body or "note" in body or "keep_names" in body:
             saved = await request.app.state.accounts.save_church(
                 user["id"],
@@ -490,6 +510,17 @@ async def start_session(session_id: str, request: Request):
         raise HTTPException(404, "Session not found.") from None
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
+    document = await request.app.state.director.session(session_id)
+    return {"ok": True, "speech_model": _speech_model(request, document or {})}
+
+
+@router.post("/api/sessions/{session_id}/pause")
+async def pause_session(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    try:
+        await request.app.state.director.pause(session_id)
+    except KeyError:
+        raise HTTPException(404, "Session not found.") from None
     return {"ok": True}
 
 
@@ -596,14 +627,30 @@ async def put_input(session_id: str, request: Request):
     await _operator_document(request, session_id)
     body = await request.json()
     try:
-        source = await request.app.state.director.set_input(session_id, str(body.get("input") or ""))
+        source = await request.app.state.director.set_input(
+            session_id, str(body.get("input") or ""), str(body.get("url") or "")
+        )
     except KeyError:
         raise HTTPException(404, "Session not found.") from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
-    return {"input": source}
+    document = await request.app.state.director.session(session_id)
+    return {"input": source, "youtube_url": (document or {}).get("youtube_url") or ""}
+
+
+@router.put("/api/sessions/{session_id}/input-boost")
+async def put_input_boost(session_id: str, request: Request):
+    await _operator_document(request, session_id)
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Input boost has to be a number.")
+    try:
+        gain = await request.app.state.director.set_input_boost(session_id, body.get("input_boost"))
+    except KeyError:
+        raise HTTPException(404, "Session not found.") from None
+    return {"input_boost": gain}
 
 
 @router.put("/api/sessions/{session_id}/propresenter")
@@ -778,6 +825,7 @@ async def _export_document(request: Request, session_id: str) -> dict:
 async def operator_session(session_id: str, request: Request):
     document = await _operator_document(request, session_id)
     payload = project_session(document, "operator")
+    payload["speech_model"] = _speech_model(request, document)
     _attach_operator(payload, document, request.app.state.settings)
     return payload
 
@@ -851,18 +899,29 @@ async def operate(websocket: WebSocket, session_id: str):
         return
     await websocket.accept()
     repository = websocket.app.state.repository
+    send_lock = asyncio.Lock()
+
+    async def send_json(payload: dict) -> None:
+        async with send_lock:
+            await websocket.send_json(payload)
 
     async def pump_events():
         async with repository.subscribe(session_id) as subscription:
             current = await websocket.app.state.director.session(session_id)
-            payload = _catchup(current, "operator", websocket.query_params.get("after", ""), websocket.app.state.settings)
-            await websocket.send_json(payload)
+            payload = _catchup(
+                current,
+                "operator",
+                websocket.query_params.get("after", ""),
+                websocket.app.state.settings,
+                websocket.app.state.recognizers,
+            )
+            await send_json(payload)
             seen = current.get("seq") or 0
             async for event in subscription:
                 if (event.get("seq") or 0) <= seen:
                     continue
                 seen = event["seq"]
-                await websocket.send_json(_event_for(event, "operator"))
+                await send_json(_event_for(event, "operator"))
                 if event.get("type") == "deleted":
                     break
 
@@ -883,14 +942,14 @@ async def operate(websocket: WebSocket, session_id: str):
                     await pipeline._set_status("paused", "Microphone permission was denied")
 
     async def pump_monitor():
-        if pipeline.doc.get("input") != "youtube":
-            await asyncio.Future()
-            return
         queue = pipeline.attach_monitor()
         try:
             while True:
                 chunk = await queue.get()
-                await websocket.send_bytes(chunk)
+                if pipeline.doc.get("input") != "youtube":
+                    continue
+                async with send_lock:
+                    await websocket.send_bytes(chunk)
         finally:
             pipeline.detach_monitor(queue)
 

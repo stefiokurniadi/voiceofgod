@@ -164,7 +164,7 @@ def _duration_seconds(value) -> float:
         return 0.0
 
 
-SERMON_PHRASES = (
+SERMON_PHRASES_EN = (
     "grace of God",
     "with you today",
     "is with you",
@@ -186,16 +186,41 @@ SERMON_PHRASES = (
     "for the first time",
     "the congregation is listening",
 )
+SERMON_PHRASES_ID = (
+    "Roh Kudus",
+    "firman Tuhan",
+    "Tuhan Yesus",
+    "Bapa",
+    "Alkitab",
+    "penghiburan",
+    "pengharapan",
+    "saudara-saudara",
+    "jemaat",
+    "syiar",
+    "walaupun",
+    "mungkin kalian",
+    "puji Tuhan",
+    "haleluya",
+)
 
 
-def speech_phrases(hotwords: str | None, limit: int = 40) -> list[str]:
+def sermon_hints(language: str) -> tuple[str, ...]:
+    """Hints in the preacher's language. Mixed sermons hear both."""
+    if language == "id":
+        return SERMON_PHRASES_ID
+    if language == "mix":
+        return SERMON_PHRASES_ID + SERMON_PHRASES_EN
+    return SERMON_PHRASES_EN
+
+
+def speech_phrases(hotwords: str | None, limit: int = 40, language: str = "en") -> list[str]:
     """Church names first, then the sermon phrases, and never past the recognizer's limit."""
     custom = []
     for phrase in (hotwords or "").split(","):
         text = phrase.strip()
         if text and text not in custom:
             custom.append(text)
-    reserved = [hint for hint in SERMON_PHRASES if hint not in custom]
+    reserved = [hint for hint in sermon_hints(language) if hint not in custom]
     room = max(0, limit - len(reserved))
     chosen = custom[:room]
     for hint in reserved:
@@ -302,7 +327,7 @@ def chirp_request(pcm: bytes, language: str, hotwords: str | None, word_times: b
         "model": "chirp_3",
         "features": features,
     }
-    phrases = speech_phrases(hotwords, limit=200)
+    phrases = speech_phrases(hotwords, limit=200, language=language)
     if phrases:
         config["adaptation"] = {
             "phraseSets": [{
@@ -408,7 +433,7 @@ class GoogleRecognizer:
     def _transcribe_v1(self, samples, pcm: bytes, language: str, hotwords: str | None) -> Transcript:
         codes = speech_language_codes(language)
         model = self.model if self.model and not self.model.startswith("chirp") else "latest_long"
-        phrases = speech_phrases(hotwords)
+        phrases = speech_phrases(hotwords, language=language)
         payload = {
             "config": {
                 "encoding": "LINEAR16",
@@ -456,7 +481,7 @@ def soniox_request(model: str, language: str, hotwords: str | None) -> dict:
         "num_channels": 1,
         "language_hints": soniox_language_hints(language),
     }
-    phrases = speech_phrases(hotwords)
+    phrases = speech_phrases(hotwords, language=language)
     if phrases:
         config["context"] = {"terms": phrases}
     return config
@@ -548,8 +573,11 @@ class SonioxRecognizer:
             close_timeout=5,
         ) as ws:
             ws.send(json.dumps(config))
-            ws.send(pcm)
-            ws.send(b"")
+            # Soniox reads raw PCM as a stream of binary frames. An empty text
+            # frame, not an empty binary frame, tells it the clip has ended.
+            for start in range(0, len(pcm), 3840):
+                ws.send(pcm[start:start + 3840])
+            ws.send("")
             while True:
                 message = ws.recv(timeout=self.timeout)
                 body = json.loads(message)
@@ -561,3 +589,17 @@ class SonioxRecognizer:
                 if body.get("finished"):
                     break
         return tokens
+
+
+def speech_model_label(recognizer) -> str:
+    """The model that hears the service, named the way the operator page shows it."""
+    if isinstance(recognizer, GoogleRecognizer):
+        if recognizer._chirp_ready():
+            return "Google Chirp 3"
+        name = recognizer.model if recognizer.model and not recognizer.model.startswith("chirp") else "latest_long"
+        return f"Google {name}"
+    if isinstance(recognizer, SonioxRecognizer):
+        return f"Soniox {recognizer.model}"
+    if isinstance(recognizer, WhisperRecognizer):
+        return f"Whisper {recognizer.model_name}"
+    return "Development"

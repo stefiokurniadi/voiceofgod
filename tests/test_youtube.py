@@ -17,6 +17,53 @@ from tests.test_phase2 import app_for
 WATCH = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 
 
+@pytest.mark.asyncio
+async def test_any_service_can_use_a_youtube_stream():
+    from app.config import Settings
+    from app.director import Director
+    from app.glossary import Glossary
+    from app.paths import GLOSSARY_PATH
+    from app.store import MemoryRepository
+    from app.stt import ScriptedRecognizer
+    from app.translator import GlossaryTranslator
+    from tests.test_phase1 import FAST
+
+    director = Director(
+        Settings(allow_fake_models=True),
+        MemoryRepository(),
+        ScriptedRecognizer(["Hello"]),
+        GlossaryTranslator(),
+        Glossary.load(GLOSSARY_PATH),
+        FAST,
+    )
+    created = await director.create_session(
+        {
+            "church_id": "church",
+            "church_name": "Grace Church",
+            "church_note": "",
+            "keep_names": [],
+            "stt_provider": "default",
+            "tts_provider": "google",
+        },
+        "Sunday",
+        "",
+        None,
+        "en",
+        False,
+        "http://test",
+    )
+    with pytest.raises(ValueError, match="YouTube link"):
+        await director.set_input(created["id"], "youtube", "")
+    with pytest.raises(ValueError, match="youtube.com"):
+        await director.set_input(created["id"], "youtube", "https://example.com/watch?v=1")
+    await director.set_input(created["id"], "youtube", WATCH)
+    pipeline = director.pipeline(created["id"])
+    assert pipeline.doc["input"] == "youtube"
+    assert pipeline.doc["youtube_url"] == WATCH
+    await director.set_input(created["id"], "browser")
+    assert pipeline.doc["input"] == "browser"
+
+
 def test_youtube_links_are_limited_to_a_video():
     assert check_youtube_url(WATCH) == WATCH
     assert check_youtube_url("https://youtu.be/dQw4w9WgXcQ")
@@ -46,6 +93,36 @@ def test_microphone_bytes_are_ignored_for_a_youtube_test(monkeypatch):
         pipe = app.state.director.pipeline(body["id"])
         assert pipe.doc["input"] == "youtube"
         assert pipe.session_time == 0
+
+
+def test_youtube_audio_reaches_a_console_opened_before_that_source(monkeypatch):
+    monkeypatch.setattr("app.director.youtube_ready", lambda: False)
+    app = app_for([])
+    with TestClient(app) as client:
+        sign_in_sync(client)
+        created = client.post("/api/sessions", json={"speaker_language": "en"})
+        assert created.status_code == 200, created.text
+        body = created.json()
+        headers = {"X-Operator-Token": body["operator_secret"], "content-type": "application/json"}
+        with client.websocket_connect(f"/ws/operate/{body['id']}?k={body['operator_secret']}") as socket:
+            assert socket.receive_json()["input"] == "browser"
+            chosen = client.put(
+                f"/api/sessions/{body['id']}/input",
+                headers=headers,
+                json={"input": "youtube", "url": WATCH},
+            )
+            assert chosen.status_code == 200, chosen.text
+            pipe = app.state.director.pipeline(body["id"])
+            chunk = pcm(0.2, 0.2)
+            socket.portal.call(pipe.start)
+            socket.portal.call(pipe.accept_pcm, chunk)
+            heard = None
+            for _ in range(8):
+                message = socket.receive()
+                if message.get("bytes") is not None:
+                    heard = message["bytes"]
+                    break
+            assert heard == chunk
 
 
 def test_a_recorded_video_is_read_in_real_time():
@@ -161,7 +238,7 @@ async def test_a_youtube_test_is_not_a_church_service(monkeypatch):
 @pytest.mark.asyncio
 async def test_youtube_audio_reaches_the_recognizer(monkeypatch):
     monkeypatch.setattr("app.director.youtube_ready", lambda: True)
-    app = await make_app(["Hello", "church", "this", "morning"])
+    app = await make_app(["Hello", "church", "this", "morning."])
     audio = pcm(1.0, 0.2) + pcm(0.4, 0.0)
     chunks = [audio[index:index + 3200] for index in range(0, len(audio), 3200)]
     seen = {}

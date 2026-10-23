@@ -11,6 +11,7 @@ import asyncio
 import contextlib
 import copy
 from dataclasses import dataclass
+import difflib
 import logging
 import re
 import time
@@ -18,11 +19,11 @@ import time
 import numpy as np
 
 from app.agreement import LocalAgreement
-from app.audio import SAMPLE_RATE, float_to_pcm16, is_voiced, pcm16_to_float, rms
+from app.audio import SAMPLE_RATE, apply_gain, clamp_input_boost, float_to_pcm16, is_voiced, pcm16_to_float, rms
 from app.captions import CaptionLine, Transcript, Word
 from app.glossary import Glossary
 from app.scripture import is_long_reading, looks_like_commentary, primary_citation, reading_status
-from app.translator import TranslationRequest, interpreter_background, target_language
+from app.translator import TranslationRequest, interpreter_background, phrase_language, target_language
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class PipelineConfig:
     min_decode_seconds: float = 0.2
     capture_stall_seconds: float = 2.0
     lag_ceiling_ms: float = 5000.0
+    sentence_wait_seconds: float = 12.0
 
 
 class SessionPipeline:
@@ -89,6 +91,7 @@ class SessionPipeline:
         self.failure_hold = False
         self.rtmp_seen = False
         self.input_level = 0.0
+        self.input_boost = clamp_input_boost(document.get("input_boost", 2))
         self.youtube_played = 0.0
         self.youtube_loading = False
         self.monitors: list[asyncio.Queue] = []
@@ -98,6 +101,11 @@ class SessionPipeline:
         self._final_turn = 0
         self._final_done: set[int] = set()
         self._final_gate = asyncio.Condition()
+        self._carry: dict | None = None
+        self._carry_flush_pending = False
+        self._spoken_text: dict[str, str] = {}
+        self._spoken_revision: dict[str, int] = {}
+        self._speech_chain: asyncio.Task | None = None
 
     async def start(self) -> None:
         self.started = True
@@ -108,7 +116,7 @@ class SessionPipeline:
         if self.watch_task is None or self.watch_task.done():
             self.watch_task = asyncio.create_task(self._watch_capture())
 
-    async def stop(self) -> None:
+    async def _halt(self) -> None:
         self.started = False
         self._stopped = True
         if self.watch_task and not self.watch_task.done():
@@ -123,7 +131,15 @@ class SessionPipeline:
             ticket, epoch = self._take_ticket()
             await self._finalize_detached(action, "stop", ticket, epoch)
         await self.idle()
+        await self._flush_held_sentence()
         await self._clear_provisional()
+
+    async def pause(self) -> None:
+        await self._halt()
+        await self._set_status("paused", "")
+
+    async def stop(self) -> None:
+        await self._halt()
         await self._set_status("ended", "")
 
     def _caption_language(self) -> str:
@@ -138,6 +154,8 @@ class SessionPipeline:
             self.provisional_gen += 1
             self.audio_epoch += 1
             self._sealed_provisional_ids.clear()
+            self._carry = None
+            self._carry_flush_pending = False
         await self._emit("status")
 
     async def set_listener_count(self, count: int) -> None:
@@ -183,7 +201,17 @@ class SessionPipeline:
         samples = pcm16_to_float(pcm)
         if samples.size == 0:
             return
+        if self.doc.get("input") == "rtmp":
+            samples = apply_gain(samples, self.input_boost)
+            self.input_level = rms(samples)
         self.last_audio_at = time.monotonic()
+        if self.doc.get("input") == "rtmp":
+            from app.rtmp import DROPPED, WAITING
+
+            if (self.doc.get("banner") or "") in {DROPPED, WAITING} or self.doc.get("status") == "paused":
+                await self._set_status("live", self._standing_banner())
+        elif self.doc.get("status") == "paused":
+            await self._set_status("live", self._standing_banner())
         if self.youtube_loading:
             self.youtube_loading = False
             from app.youtube import LOADING
@@ -193,18 +221,23 @@ class SessionPipeline:
         if self.doc.get("input") == "youtube":
             self.youtube_played += len(samples) / self.config.sample_rate
             self._offer_monitor(pcm)
-        if self.doc.get("status") == "paused":
-            await self._set_status("live", self._standing_banner())
         action = None
+        flush = None
         async with self.lock:
             action = self._ingest(samples)
+            if action is not None and action["type"] == "endpoint":
+                action["ticket"], action["epoch"] = self._take_ticket()
+            elif self._quiet_flush_due(action):
+                self._carry_flush_pending = True
+                flush = self._take_ticket()
+        if flush is not None:
+            self._spawn(self._flush_carry(flush[0], flush[1]))
         if action is None:
             return
         if action["type"] == "decode":
             self._spawn(self._decode())
         elif action["type"] == "endpoint":
-            ticket, epoch = self._take_ticket()
-            self._spawn(self._finalize_detached(action, "endpoint", ticket, epoch))
+            self._spawn(self._finalize_detached(action, "endpoint", action["ticket"], action["epoch"]))
 
     async def drop_partial(self) -> None:
         """Forget the audio that was still being heard. Used when a test seeks."""
@@ -219,6 +252,8 @@ class SessionPipeline:
             self.youtube_played = 0.0
             self.doc["provisional"] = None
             self.provisional_gen += 1
+            self._carry = None
+            self._carry_flush_pending = False
             self._clear_monitors()
         await self._emit("state")
 
@@ -334,18 +369,20 @@ class SessionPipeline:
                     transcript = await self._recognize(audio, language, hotwords)
                 except Exception:
                     logger.exception("speech recognition failed for session %s", self.doc["id"])
-                    await self._recognition_failed()
+                    await self._skip_failed_recognition()
                     break
                 stt_ms = (time.monotonic() - started) * 1000
                 commit = None
+                ticket_epoch = None
                 async with self.lock:
                     if generation != self.generation or self.buffer_origin != origin:
                         continue
                     commit = self._apply_hypothesis(transcript, origin, stt_ms, force_cut, len(audio) / self.config.sample_rate)
                     if commit is not None:
                         self.force_cut = False
-                if commit is not None:
-                    ticket, epoch = self._take_ticket()
+                        ticket_epoch = self._take_ticket()
+                if commit is not None and ticket_epoch is not None:
+                    ticket, epoch = ticket_epoch
                     self._spawn(self._finish_when_ready(commit, time.monotonic(), stt_ms, ticket, epoch))
                 elif transcript.words:
                     await self._emit("state")
@@ -392,26 +429,37 @@ class SessionPipeline:
         self.buffer_origin += cut / self.config.sample_rate
 
     def _write_provisional(self, words, stt_ms: float, confirmed: int = 0) -> None:
-        text = self.glossary.preferred_casing(_text(words))
-        current = self.doc.get("provisional")
-        if self._reusable_provisional(current):
-            line_id = current["id"]
-            translation = current.get("translation") or ""
-        else:
-            line_id = self._new_id()
+        live = self.glossary.preferred_casing(_text(words))
+        carry = self._carry if self._carry and str(self._carry.get("text") or "").strip() else None
+        if carry:
+            text = self.glossary.preferred_casing(_join_caption(str(carry["text"]), live))
+            line_id = str(carry["id"])
             translation = ""
+            t0 = float(carry["t0"])
+            carry_words = len(str(carry["text"]).split())
+        else:
+            text = live
+            t0 = words[0].start
+            carry_words = 0
+            current = self.doc.get("provisional")
+            if self._reusable_provisional(current):
+                line_id = current["id"]
+                translation = current.get("translation") or ""
+            else:
+                line_id = self._new_id()
+                translation = ""
         line = CaptionLine(
             id=line_id,
             state="provisional",
             original=text,
             translation=translation,
-            t0=words[0].start,
+            t0=t0,
             t1=words[-1].end,
             stt_ms=round(stt_ms, 1),
         )
         self._apply_audience(line, stick=False)
         spoken = line.as_dict()
-        spoken["settled"] = max(0, min(int(confirmed), len(words)))
+        spoken["settled"] = carry_words + max(0, min(int(confirmed), len(words)))
         self.doc["provisional"] = spoken
         self.provisional_gen += 1
         self.doc.setdefault("metrics", {})["stt_ms"] = round(stt_ms, 1)
@@ -493,8 +541,15 @@ class SessionPipeline:
     async def _finish_when_ready(self, line: CaptionLine, endpoint_at: float, stt_ms: float, ticket: int, epoch: int) -> None:
         try:
             await self._wait_turn(ticket)
-            if not self._stale(epoch):
-                await self._finish_final(line, endpoint_at=endpoint_at, stt_ms=stt_ms, epoch=epoch)
+            if self._stale(epoch):
+                return
+            async with self.lock:
+                ready = [] if self._stale(epoch) else self._sentence_gate(line)
+            if self._stale(epoch):
+                return
+            await self._emit("state")
+            for item in ready:
+                await self._finish_final(item, endpoint_at=endpoint_at, stt_ms=stt_ms, epoch=epoch)
         finally:
             await self._advance_turn(ticket)
 
@@ -513,7 +568,8 @@ class SessionPipeline:
                 transcript = await self._recognize(audio, language, hotwords, whole=True)
             except Exception:
                 logger.exception("speech recognition failed for session %s", self.doc["id"])
-                await self._recognition_failed()
+                await self._skip_failed_recognition()
+                await self._retire_provisional(action.get("provisional_id"))
                 return
             stt_ms = (time.monotonic() - started) * 1000
             words = _absolute(transcript.words, origin)
@@ -529,8 +585,14 @@ class SessionPipeline:
                     return
                 if self.doc.get("banner") == "Worship":
                     self.doc["banner"] = ""
-                line = self._attach_or_begin(words, stt_ms, action.get("provisional_id"))
-            await self._finish_final(line, endpoint_at=endpoint_at, stt_ms=stt_ms, epoch=epoch)
+                if self._carry:
+                    line = self._begin_final(words, stt_ms, action.get("provisional_id"))
+                else:
+                    line = self._attach_or_begin(words, stt_ms, action.get("provisional_id"))
+                ready = self._sentence_gate(line)
+            await self._emit("state")
+            for item in ready:
+                await self._finish_final(item, endpoint_at=endpoint_at, stt_ms=stt_ms, epoch=epoch)
         finally:
             provisional_id = action.get("provisional_id")
             if provisional_id:
@@ -562,10 +624,25 @@ class SessionPipeline:
         started = time.monotonic()
         banner = None
         try:
-            translation, missing = await asyncio.wait_for(
-                self.translator.translate(request),
-                timeout=self.config.translate_timeout_seconds,
-            )
+            revise = getattr(self.translator, "revise", None)
+            if revise is not None:
+                corrected, translation, missing = await asyncio.wait_for(
+                    revise(request),
+                    timeout=self.config.translate_timeout_seconds,
+                )
+                accepted = accept_revision(line.original, corrected)
+                if accepted is not None and accepted.casefold() != " ".join(line.original.split()).casefold():
+                    line.heard = line.original
+                    line.original = self.glossary.preferred_casing(accepted)
+            elif phrase_language(line.original) == caption:
+                translation, missing = line.original, []
+            else:
+                translation, missing = await asyncio.wait_for(
+                    self.translator.translate(request),
+                    timeout=self.config.translate_timeout_seconds,
+                )
+            if phrase_language(line.original) == caption:
+                translation, missing = line.original, []
             line.translation = finish_translation(line.original, translation, _keep_words(self.glossary), target=caption)
             line.glossary_miss = missing
             line.translate_ms = round((time.monotonic() - started) * 1000, 1)
@@ -585,7 +662,11 @@ class SessionPipeline:
                 self.last_final_t1 = line.t1
             existing = [item for item in self.doc["lines"] if item["id"] == line.id]
             payload = line.as_dict()
-            payload["audio"] = False
+            if existing and existing[0].get("audio"):
+                payload["audio"] = True
+                payload["audio_id"] = existing[0].get("audio_id") or line.id
+            else:
+                payload["audio"] = False
             if existing:
                 existing[0].update(payload)
             else:
@@ -602,7 +683,7 @@ class SessionPipeline:
                 self.doc["banner"] = self._standing_banner()
             stored = payload
         await self._emit("line", stored)
-        self._spawn(self._publish_audio(line.id, spoken))
+        self._enqueue_speech(line.id, spoken, epoch)
 
     async def _recognize(self, audio: np.ndarray, language: str, hotwords: str | None, whole: bool = False) -> Transcript:
         if whole:
@@ -666,35 +747,72 @@ class SessionPipeline:
         self.clips[line_id] = clip
         return True
 
-    async def _publish_audio(self, line_id: str, text: str) -> None:
-        ready = await self._store_clip(line_id, text)
-        if not ready:
+    def _enqueue_speech(self, line_id: str, text: str, epoch: int) -> None:
+        """Speak lines in order. An update waits, then speaks only the words that were added."""
+        if not text.strip():
+            return
+        prior = self._speech_chain
+
+        async def run() -> None:
+            if prior is not None:
+                with contextlib.suppress(Exception):
+                    await prior
+            await self._speak_in_turn(line_id, text, epoch)
+
+        task = asyncio.create_task(run())
+        self._speech_chain = task
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def _speak_in_turn(self, line_id: str, text: str, epoch: int) -> None:
+        if self._stale(epoch):
+            return
+        text = " ".join(text.split())
+        async with self.lock:
+            if self._stale(epoch):
+                return
+            previous = self._spoken_text.get(line_id, "")
+            addition = speech_addition(previous, text)
+            if addition is None:
+                return
+            revision = self._spoken_revision.get(line_id, 0) + 1
+            self._spoken_revision[line_id] = revision
+            self._spoken_text[line_id] = text
+            clip_id = line_id if revision == 1 else f"{line_id}#{revision}"
+        if not await self._store_clip(clip_id, addition):
+            async with self.lock:
+                if self._spoken_text.get(line_id) == text:
+                    self._spoken_text[line_id] = previous
+                    self._spoken_revision[line_id] = revision - 1
+            return
+        if self._stale(epoch):
+            self.clips.pop(clip_id, None)
             return
         async with self.lock:
-            found = next((item for item in self.doc["lines"] if item["id"] == line_id), None)
-            if found is None:
-                self.clips.pop(line_id, None)
+            if self._stale(epoch):
+                self.clips.pop(clip_id, None)
                 return
-            current = "" if found.get("hidden") else (found.get("listener_translation") or "").strip()
-            if current != text:
-                self.clips.pop(line_id, None)
+            found = next((item for item in self.doc["lines"] if item["id"] == line_id), None)
+            if found is None or found.get("hidden"):
+                self.clips.pop(clip_id, None)
                 return
             found["audio"] = True
+            found["audio_id"] = clip_id
             stored = copy.deepcopy(found)
         await self._emit("line", stored)
 
-    async def _recognition_failed(self) -> None:
-        self.failure_hold = True
-        self.started = False
-        self._stopped = True
-        if self.watch_task and not self.watch_task.done():
-            self.watch_task.cancel()
+    async def _skip_failed_recognition(self) -> None:
+        """Drop the clip that the recognizer rejected and keep listening."""
         async with self.lock:
             self.buffer = np.zeros(0, dtype=np.float32)
             self.speech_active = False
-            self.doc["provisional"] = None
+            self.silence_run = 0.0
+            self.generation += 1
+            self.audio_epoch += 1
             self.provisional_gen += 1
-        await self._set_status("paused", "Speech recognition failed. Press Start to try again.")
+            self.doc["provisional"] = None
+            self.dirty = False
+        await self._emit("state")
 
     async def _maybe_worship(self, audio: np.ndarray) -> None:
         duration = len(audio) / self.config.sample_rate
@@ -718,11 +836,13 @@ class SessionPipeline:
             stalled = time.monotonic() - self.last_audio_at > self.config.capture_stall_seconds
             if stalled and self.doc.get("status") == "live":
                 if self.doc.get("input") == "rtmp":
-                    from app.rtmp import DROPPED, UNAVAILABLE, WAITING
+                    from app.rtmp import UNAVAILABLE, WAITING
 
-                    if (self.doc.get("banner") or "") == UNAVAILABLE:
+                    if (self.doc.get("banner") or "") == UNAVAILABLE or self.rtmp_seen:
                         continue
-                    banner = DROPPED if self.rtmp_seen else WAITING
+                    if (self.doc.get("banner") or "") != WAITING:
+                        await self._set_status("live", WAITING)
+                    continue
                 elif self.doc.get("input") == "youtube":
                     from app.youtube import ENDED, UNAVAILABLE, WAITING
 
@@ -837,6 +957,189 @@ class SessionPipeline:
         if track:
             self.tasks.add(task)
             task.add_done_callback(self.tasks.discard)
+
+    def _quiet_flush_due(self, action: dict | None) -> bool:
+        if action is not None or self.speech_active or self.decoding or self._carry_flush_pending:
+            return False
+        if not self._carry or self._final_next != self._final_turn:
+            return False
+        return self.session_time - float(self._carry["t1"]) >= self.config.reading_gap_seconds
+
+    def _sentence_gate(self, line: CaptionLine) -> list[CaptionLine]:
+        """Send only text up to the last full stop. Hold the rest for the next chunk."""
+        carry = self._carry if self._carry and str(self._carry.get("text") or "").strip() else None
+        if carry:
+            text = _join_caption(str(carry["text"]), line.original)
+            t0 = float(carry["t0"])
+            line_id = str(carry["id"])
+        else:
+            text = line.original.strip()
+            t0 = line.t0
+            line_id = line.id
+        text = self.glossary.preferred_casing(text).strip()
+        t1 = line.t1 if line.t1 >= t0 else t0
+        if text and (t1 - t0) >= self.config.sentence_wait_seconds:
+            self._carry = None
+            line.original = text
+            line.t0 = t0
+            line.t1 = t1
+            line.id = line_id
+            self._drop_matching_provisional(line_id)
+            return [line]
+        finished, rest = _split_sentence(text)
+        if not finished:
+            self._carry = {"id": line_id, "text": text, "t0": t0, "t1": t1}
+            self._show_carry(line.stt_ms)
+            return []
+        cut = _portion_time(text, finished, t0, t1)
+        line.original = finished
+        line.t0 = t0
+        line.t1 = cut
+        line.id = line_id
+        if rest:
+            self._carry = {"id": self._new_id(), "text": rest, "t0": cut, "t1": t1}
+            self._show_carry(line.stt_ms)
+        else:
+            self._carry = None
+            self._drop_matching_provisional(line_id)
+        return [line]
+
+    def _show_carry(self, stt_ms: float | None) -> None:
+        carry = self._carry
+        if not carry:
+            return
+        text = self.glossary.preferred_casing(str(carry["text"]))
+        caption = CaptionLine(
+            id=str(carry["id"]),
+            state="provisional",
+            original=text,
+            translation="",
+            t0=float(carry["t0"]),
+            t1=float(carry["t1"]),
+            stt_ms=stt_ms,
+        )
+        self._apply_audience(caption, stick=False)
+        spoken = caption.as_dict()
+        spoken["settled"] = 0
+        self.doc["provisional"] = spoken
+        self.provisional_gen += 1
+
+    def _drop_matching_provisional(self, line_id: str) -> None:
+        provisional = self.doc.get("provisional")
+        if provisional and provisional.get("id") == line_id:
+            self.doc["provisional"] = None
+            self.provisional_gen += 1
+
+    def _take_carry_line(self) -> CaptionLine | None:
+        carry = self._carry
+        if not carry or not str(carry.get("text") or "").strip():
+            self._carry = None
+            return None
+        self._carry = None
+        text = self.glossary.preferred_casing(str(carry["text"]).strip())
+        self._drop_matching_provisional(str(carry["id"]))
+        return CaptionLine(
+            id=str(carry["id"]),
+            state="final",
+            original=text,
+            translation="",
+            t0=float(carry["t0"]),
+            t1=float(carry["t1"]),
+        )
+
+    async def _flush_carry(self, ticket: int, epoch: int, *, force: bool = False) -> None:
+        line = None
+        try:
+            await self._wait_turn(ticket)
+            if not self._stale(epoch):
+                async with self.lock:
+                    if not self._stale(epoch) and self._carry:
+                        quiet_for = self.session_time - float(self._carry["t1"])
+                        ready = force or (
+                            not self.speech_active
+                            and not self.decoding
+                            and quiet_for >= self.config.reading_gap_seconds
+                        )
+                        if ready:
+                            line = self._take_carry_line()
+            if line is not None:
+                await self._finish_final(line, endpoint_at=time.monotonic(), stt_ms=line.stt_ms or 0.0, epoch=epoch)
+        finally:
+            self._carry_flush_pending = False
+            await self._advance_turn(ticket)
+
+    async def _flush_held_sentence(self) -> None:
+        async with self.lock:
+            if not self._carry:
+                return
+            ticket, epoch = self._take_ticket()
+        await self._flush_carry(ticket, epoch, force=True)
+
+
+_SENTENCE_END = re.compile(r"(?:\.\.\.|…|[.?!])[\"'”’)\]]*(?=\s|$)")
+
+
+def _split_sentence(text: str) -> tuple[str, str]:
+    """Text up to the last full stop, and the unfinished tail after it."""
+    last = None
+    for match in _SENTENCE_END.finditer(text):
+        last = match
+    if last is None:
+        return "", text.strip()
+    return text[: last.end()].strip(), text[last.end() :].strip()
+
+
+def _portion_time(text: str, finished: str, t0: float, t1: float) -> float:
+    total = len(text.split()) or 1
+    done = len(finished.split())
+    if done >= total:
+        return t1
+    span = max(0.0, t1 - t0)
+    return t0 + span * (done / total)
+
+
+def accept_revision(raw: str, corrected: str) -> str | None:
+    """Keep a cleanup that still says the same line. Reject a rewrite."""
+    raw_text = " ".join(raw.split())
+    revised = " ".join((corrected or "").split())
+    if not revised:
+        return None
+    if raw_text.casefold() == revised.casefold():
+        return revised
+    raw_words = raw_text.split()
+    revised_words = revised.split()
+    if not raw_words:
+        return None
+    if abs(len(revised_words) - len(raw_words)) / len(raw_words) > 0.30:
+        return None
+    if difflib.SequenceMatcher(a=raw_text.casefold(), b=revised.casefold()).ratio() < 0.6:
+        return None
+    return revised
+
+
+def _spoken_token(word: str) -> str:
+    return word.strip(".,!?;:\"'“”").casefold()
+
+
+def speech_addition(previous: str, current: str) -> str | None:
+    """Words still to be spoken after a line grows. None when nothing new was added."""
+    current = " ".join(current.split())
+    previous = " ".join(previous.split())
+    if not current or current == previous:
+        return None
+    if not previous:
+        return current
+    previous_words = previous.split()
+    current_words = current.split()
+    shared = 0
+    while shared < len(previous_words) and shared < len(current_words):
+        if _spoken_token(previous_words[shared]) != _spoken_token(current_words[shared]):
+            break
+        shared += 1
+    if shared == 0:
+        return current
+    extra = " ".join(current_words[shared:]).strip()
+    return extra or None
 
 
 def _should_attach(previous: str, new: str, gap: float, limit: float) -> bool:
@@ -963,6 +1266,9 @@ def finish_translation(source: str, text: str, keep: set[str] | None = None, *, 
         kept.update(name.split())
     if re.search(r"\bSunday\b", source):
         kept.add("Minggu")
+    # The listener language wins. A caption already heard in that language stays there.
+    if target in {"en", "id"} and phrase_language(source) == target and phrase_language(text) not in {None, target}:
+        text = source
     return polish_translation(repair_translation(source, text, kept, target=target), kept)
 
 

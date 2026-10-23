@@ -52,6 +52,15 @@ async def feed(pipeline: SessionPipeline, seconds: float, amplitude: float) -> N
         remaining -= step
 
 
+async def settle(pipe: SessionPipeline) -> None:
+    """Close the open chunk, then stay quiet long enough to send an unfinished sentence."""
+    await feed(pipe, pipe.config.hangover_seconds + 0.25, 0.0)
+    await pipe.idle()
+    if pipe._carry:
+        await feed(pipe, pipe.config.reading_gap_seconds + 0.35, 0.0)
+        await pipe.idle()
+
+
 def document(language: str = "en") -> dict:
     return {
         "id": "test-session",
@@ -83,8 +92,7 @@ def pipeline_for(words: list[str], language: str = "en", config: PipelineConfig 
 async def speak(pipe: SessionPipeline, seconds: float = 1.0) -> None:
     await pipe.start()
     await feed(pipe, seconds, 0.25)
-    await feed(pipe, 0.4, 0.0)
-    await pipe.idle()
+    await settle(pipe)
 
 
 def test_glossary_protects_church_name_and_translates_the_word():
@@ -170,6 +178,25 @@ def test_a_scrap_stays_on_the_line_it_continues():
     assert polish_translation("Roh Kudus Menghibur setiap orang.", {"Roh", "Kudus"}) == "Roh Kudus menghibur setiap orang."
 
 
+def test_a_caption_already_in_the_listener_language_stays_there():
+    from app.pipeline import finish_translation
+    from app.translator import phrase_language
+
+    assert phrase_language("endurance in their life") == "en"
+    assert phrase_language("Ketahanan dalam hidup mereka") == "id"
+    assert phrase_language("Amen") is None
+    assert finish_translation(
+        "endurance in their life",
+        "Ketahanan dalam hidup mereka",
+        target="en",
+    ) == "Endurance in their life"
+    assert finish_translation(
+        "ketahanan dalam hidup mereka",
+        "Endurance in their life",
+        target="id",
+    ) == "Ketahanan dalam hidup mereka"
+
+
 def test_a_bad_translation_does_not_change_what_was_said():
     from app.pipeline import finish_translation
 
@@ -244,7 +271,7 @@ def _translated(words: list[str], translator, config: PipelineConfig | None = No
 @pytest.mark.asyncio
 async def test_ending_a_sentence_does_not_stop_the_audio_intake():
     config = PipelineConfig(**{**FAST.__dict__, "translate_timeout_seconds": 3.0})
-    pipe = _translated(["Hello", "church", "this", "morning"], _RecordingTranslator(delay=1.0), config)
+    pipe = _translated(["Hello", "church", "this", "morning."], _RecordingTranslator(delay=1.0), config)
     await pipe.start()
     await feed(pipe, 1.0, 0.25)
     await pipe.accept_pcm(pcm(0.2, 0.0))
@@ -260,12 +287,12 @@ async def test_ending_a_sentence_does_not_stop_the_audio_intake():
 async def test_a_slower_translation_still_keeps_the_spoken_order():
     translator = _RecordingTranslator(slow_first=0.6)
     config = PipelineConfig(**{**FAST.__dict__, "translate_timeout_seconds": 3.0})
-    pipe = _translated(["Hello", "church", "this", "morning"], translator, config)
+    pipe = _translated(["Hello", "church", "this", "morning."], translator, config)
     await pipe.start()
     await feed(pipe, 1.0, 0.25)
     await feed(pipe, 0.4, 0.0)
     await asyncio.wait_for(translator.started.wait(), timeout=2)
-    pipe.recognizer.words = ["Second", "sentence", "starts", "now"]
+    pipe.recognizer.words = ["Second", "sentence", "starts", "now."]
     await feed(pipe, 1.0, 0.25)
     await feed(pipe, 0.4, 0.0)
     await pipe.idle()
@@ -346,8 +373,7 @@ async def test_final_line_does_not_change_when_the_speaker_continues():
     first = pipe.doc["lines"][0]["original"]
     pipe.recognizer.words = ["A", "completely", "different", "sentence"]
     await feed(pipe, 1.0, 0.25)
-    await feed(pipe, 0.4, 0.0)
-    await pipe.idle()
+    await settle(pipe)
     assert pipe.doc["lines"][0]["original"] == first
     assert len(pipe.doc["lines"]) >= 2
 
@@ -391,7 +417,7 @@ async def test_hide_removes_the_line_for_listeners():
 
 
 @pytest.mark.asyncio
-async def test_a_period_does_not_end_the_line_while_the_speaker_continues():
+async def test_a_pause_sends_the_finished_sentence_and_holds_the_rest():
     config = PipelineConfig(**{**FAST.__dict__, "decode_interval_seconds": 0.25, "min_sentence_words": 4})
     glossary = Glossary.load(GLOSSARY_PATH)
     recognizer = GrowingRecognizer(["Please", "open", "your", "Bible.", "Then", "we", "sing"])
@@ -403,9 +429,8 @@ async def test_a_period_does_not_end_the_line_while_the_speaker_continues():
     await feed(pipe, 0.5, 0.0)
     await pipe.idle()
     finals = [line["original"] for line in pipe.doc["lines"]]
-    assert len(finals) == 1
-    assert "Bible" in finals[0]
-    assert "sing" in finals[0]
+    assert finals == ["Please open your Bible."]
+    assert "sing" in pipe.doc["provisional"]["original"]
 
 
 @pytest.mark.asyncio
@@ -430,8 +455,7 @@ async def test_api_session_projects_listener_without_the_operator_secret():
         assert started.status_code == 200
         pipe = app.state.director.pipeline(body["id"])
         await feed(pipe, 1.0, 0.25)
-        await feed(pipe, 0.4, 0.0)
-        await pipe.idle()
+        await settle(pipe)
         captions = await client.get(f"/api/sessions/{body['id']}/captions")
         assert captions.status_code == 200
         payload = captions.json()
@@ -447,3 +471,185 @@ async def test_api_session_projects_listener_without_the_operator_secret():
         assert hidden.status_code == 200
         again = await client.get(f"/api/sessions/{body['id']}/captions")
         assert again.json()["lines"] == []
+
+
+@pytest.mark.asyncio
+async def test_pause_keeps_the_service_and_stop_ends_it():
+    director = Director(
+        Settings(allow_fake_models=True),
+        MemoryRepository(),
+        ScriptedRecognizer(["Hello"]),
+        GlossaryTranslator(),
+        Glossary.load(GLOSSARY_PATH),
+        FAST,
+    )
+    created = await director.create_session(
+        {
+            "church_id": "church",
+            "church_name": "Grace Church",
+            "church_note": "",
+            "keep_names": [],
+            "stt_provider": "default",
+            "tts_provider": "google",
+        },
+        "Sunday",
+        "",
+        None,
+        "en",
+        False,
+        "http://test",
+    )
+    await director.start(created["id"])
+    pipeline = director.pipeline(created["id"])
+    assert pipeline.doc["status"] == "live"
+    await director.pause(created["id"])
+    assert pipeline.doc["status"] == "paused"
+    assert pipeline.started is False
+    await director.stop(created["id"])
+    assert pipeline.doc["status"] == "ended"
+
+
+def test_the_live_line_keeps_the_unfinished_words_in_front():
+    from app.captions import Word
+
+    pipe = pipeline_for(["ignored"])
+    pipe._carry = {"id": "L00007", "text": "Maybe some of you", "t0": 1.0, "t1": 2.0}
+    pipe._write_provisional([Word("are", 2.1, 2.4), Word("tired", 2.4, 2.8)], 10)
+    assert pipe.doc["provisional"]["original"] == "Maybe some of you are tired"
+    assert pipe.doc["provisional"]["id"] == "L00007"
+
+
+def test_a_verse_number_is_not_a_sentence_end():
+    from app.captions import CaptionLine
+    from app.pipeline import _split_sentence
+
+    assert _split_sentence("Yohanes 3.16 adalah firman") == ("", "Yohanes 3.16 adalah firman")
+    pipe = pipeline_for(["ignored"])
+    ready = pipe._sentence_gate(CaptionLine("L1", "final", "Kita semua. Maybe some of you", "", 0.0, 4.0))
+    assert [line.original for line in ready] == ["Kita semua."]
+    assert pipe._carry["text"] == "Maybe some of you"
+    follow = pipe._sentence_gate(CaptionLine("L9", "final", "are tired.", "", 4.2, 6.0))
+    assert [line.original for line in follow] == ["Maybe some of you are tired."]
+    assert pipe._carry is None
+
+
+def test_twelve_seconds_sends_an_unfinished_line():
+    from app.captions import CaptionLine
+
+    pipe = pipeline_for(["ignored"])
+    ready = pipe._sentence_gate(CaptionLine("L1", "final", "masih belum selesai", "", 0.0, 12.0))
+    assert [line.original for line in ready] == ["masih belum selesai"]
+    assert pipe._carry is None
+
+
+def test_a_rewrite_is_rejected_and_a_mishearing_is_kept():
+    from app.pipeline import accept_revision
+
+    assert accept_revision("morning kalian", "mungkin kalian") == "mungkin kalian"
+    assert accept_revision("Hello church this morning", "Selamat pagi jemaat yang dikasihi Tuhan kita") is None
+    assert accept_revision("Hello church", "") is None
+
+
+@pytest.mark.asyncio
+async def test_an_unfinished_chunk_waits_for_a_full_stop():
+    translator = _RecordingTranslator()
+    pipe = _translated(["hello", "church", "this"], translator)
+    await pipe.start()
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    assert translator.calls == []
+    assert pipe._carry
+    pipe.recognizer.words = ["morning."]
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    assert len(translator.calls) == 1
+    assert "hello" in translator.calls[0]
+    assert "morning" in translator.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_quiet_and_stop_send_the_unfinished_sentence():
+    translator = _RecordingTranslator()
+    pipe = _translated(["mungkin", "kalian"], translator)
+    await pipe.start()
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    assert translator.calls == []
+    await feed(pipe, pipe.config.reading_gap_seconds + 0.35, 0.0)
+    await pipe.idle()
+    assert translator.calls
+    assert "mungkin" in translator.calls[0]
+
+    other = _translated(["masih", "berkata"], _RecordingTranslator())
+    await other.start()
+    await feed(other, 1.0, 0.25)
+    await feed(other, 0.4, 0.0)
+    await other.idle()
+    assert other._carry
+    await other.stop()
+    assert other.doc["status"] == "ended"
+    assert other.doc["lines"]
+    assert "berkata" in other.doc["lines"][0]["original"]
+
+
+@pytest.mark.asyncio
+async def test_a_language_change_drops_the_unfinished_sentence():
+    pipe = pipeline_for(["mungkin", "kalian"])
+    await pipe.start()
+    await feed(pipe, 1.0, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    assert pipe._carry
+    await pipe.set_language("id")
+    assert pipe._carry is None
+    await pipe.stop()
+    assert pipe.doc["lines"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_long_unfinished_line_is_sent_without_a_full_stop():
+    translator = _RecordingTranslator()
+    config = PipelineConfig(**{**FAST.__dict__, "sentence_wait_seconds": 1.0})
+    pipe = _translated(["hello", "church", "this"], translator, config)
+    await pipe.start()
+    await feed(pipe, 1.2, 0.25)
+    await feed(pipe, 0.4, 0.0)
+    await pipe.idle()
+    assert translator.calls
+    assert pipe._carry is None
+
+
+@pytest.mark.asyncio
+async def test_a_revision_replaces_the_original_and_keeps_what_was_heard():
+    class Revising:
+        async def revise(self, request):
+            del request
+            return "mungkin kalian.", "perhaps you.", []
+
+    glossary = Glossary.load(GLOSSARY_PATH)
+    pipe = SessionPipeline(
+        document(),
+        MemoryRepository(),
+        ScriptedRecognizer(["morning", "kalian."]),
+        Revising(),
+        glossary,
+        FAST,
+    )
+    await speak(pipe)
+    line = pipe.doc["lines"][0]
+    assert line["original"] == "mungkin kalian."
+    assert line["heard"] == "morning kalian."
+    assert "Perhaps you." in line["translation"]
+
+
+def test_a_source_token_comes_back_as_the_spoken_words():
+    glossary = Glossary([], []).merged([], [{"en": "grace", "id": "anugerah"}])
+    protection = glossary.protect("full of grace", "en")
+    restored, missing = glossary.restore_source(protection.text, protection)
+    assert restored == "full of grace"
+    assert missing == []
+    translated, _missing = glossary.restore(protection.text, protection)
+    assert "anugerah" in translated

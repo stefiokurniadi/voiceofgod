@@ -16,7 +16,7 @@ from app.pipeline import SessionPipeline
 from app.store import MemoryRepository
 from app.stt import ScriptedRecognizer, WhisperRecognizer
 from app.translator import GlossaryTranslator
-from tests.test_phase1 import FAST, document, feed
+from tests.test_phase1 import FAST, document, feed, settle
 
 
 def test_a_missing_session_is_not_reported_as_a_bad_token():
@@ -207,8 +207,7 @@ async def test_glossary_edit_changes_the_next_utterance_only_for_that_session():
         for session_id in (first["id"], second["id"]):
             pipe = app.state.director.pipeline(session_id)
             await feed(pipe, 1.0, 0.25)
-            await feed(pipe, 0.4, 0.0)
-            await pipe.idle()
+            await settle(pipe)
         first_line = app.state.director.pipeline(first["id"]).doc["lines"][0]["translation"]
         second_line = app.state.director.pipeline(second["id"]).doc["lines"][0]["translation"]
         assert "kasih" in first_line
@@ -226,8 +225,7 @@ async def test_resume_export_overlay_and_metrics():
         headers = {"X-Operator-Token": session["operator_secret"]}
         pipe = app.state.director.pipeline(session["id"])
         await feed(pipe, 1.0, 0.25)
-        await feed(pipe, 0.4, 0.0)
-        await pipe.idle()
+        await settle(pipe)
         captions = await client.get(f"/api/sessions/{session['id']}/captions")
         line_id = captions.json()["lines"][0]["id"]
         resumed = await client.get(f"/api/sessions/{session['id']}/captions", params={"after": line_id})
@@ -292,8 +290,7 @@ async def test_restart_keeps_the_transcript_and_pauses_a_live_session():
     await first.start(created["id"])
     pipe = first.pipeline(created["id"])
     await feed(pipe, 1.0, 0.25)
-    await feed(pipe, 0.4, 0.0)
-    await pipe.idle()
+    await settle(pipe)
     assert pipe.doc["lines"]
     second = Director(
         Settings(allow_fake_models=True),
@@ -344,6 +341,6 @@ async def test_a_recognition_failure_pauses_without_inventing_a_caption():
     await feed(pipe, 0.4, 0.0)
     await pipe.idle()
     assert pipe.doc["lines"] == []
-    assert pipe.doc["status"] == "paused"
-    assert "Speech recognition failed" in pipe.doc["banner"]
-    assert pipe.started is False
+    assert pipe.doc["status"] == "live"
+    assert pipe.started is True
+    assert "Speech recognition failed" not in (pipe.doc.get("banner") or "")

@@ -12,9 +12,19 @@ from app.paths import GLOSSARY_PATH
 from app.pipeline import SessionPipeline
 from app.store import MemoryRepository
 from app.captions import Transcript, Word
-from app.stt import GoogleRecognizer, ScriptedRecognizer, _load_google_credentials, speech_phrases
+from app.stt import GoogleRecognizer, ScriptedRecognizer, SonioxRecognizer, WhisperRecognizer, _load_google_credentials, speech_model_label, speech_phrases
 from app.translator import GeminiTranslator, GlossaryTranslator, TranslationRequest
 from tests.test_phase1 import FAST, document, feed, speak
+
+
+def test_speech_model_label_names_the_recognizer_used_at_start():
+    chirp = GoogleRecognizer("key", "voiceofgod", credentials_path="/tmp/google-login.json")
+    fallback = GoogleRecognizer("key", "")
+    assert speech_model_label(chirp) == "Google Chirp 3"
+    assert speech_model_label(fallback) == "Google latest_long"
+    assert speech_model_label(SonioxRecognizer("secret", "stt-rt-v5")) == "Soniox stt-rt-v5"
+    assert speech_model_label(WhisperRecognizer("small", "cpu", "int8")) == "Whisper small"
+    assert speech_model_label(ScriptedRecognizer([])) == "Development"
 
 
 def test_chirp_pins_the_session_language():
@@ -47,15 +57,22 @@ def test_chirp_pins_the_session_language():
     assert seen["body"]["config"]["model"] == "latest_long"
     assert seen["body"]["config"]["languageCode"] == "id-ID"
     assert seen["body"]["config"]["speechContexts"][0]["phrases"][:2] == ["Holy Spirit", "pastor"]
-    assert "with you today" in seen["body"]["config"]["speechContexts"][0]["phrases"]
-    assert "Brothers and sisters" in seen["body"]["config"]["speechContexts"][0]["phrases"]
-    assert "salvation is a gift" in seen["body"]["config"]["speechContexts"][0]["phrases"]
+    assert "Roh Kudus" in seen["body"]["config"]["speechContexts"][0]["phrases"]
+    assert "firman Tuhan" in seen["body"]["config"]["speechContexts"][0]["phrases"]
+    assert "this Sunday morning" not in seen["body"]["config"]["speechContexts"][0]["phrases"]
     assert seen["url"].startswith("https://speech.googleapis.com/v1/speech:recognize")
     assert "key=" not in seen["url"]
     crowded = speech_phrases(", ".join(f"name {index}" for index in range(45)))
     assert len(crowded) == 40
     assert "let us pray" in crowded
     assert "after the service" in crowded
+    indonesian = speech_phrases("Grace Church", language="id")
+    assert indonesian[0] == "Grace Church"
+    assert "Roh Kudus" in indonesian
+    assert "this Sunday morning" not in indonesian
+    mixed = speech_phrases(None, language="mix")
+    assert "Roh Kudus" in mixed
+    assert "Holy Spirit" in mixed
 
 
 def test_chirp_uses_speech_v2_when_a_service_account_is_available():
@@ -146,6 +163,38 @@ async def test_gemini_restores_glossary_and_leaves_session_context_empty():
     await translator.aclose()
 
 
+@pytest.mark.asyncio
+async def test_revise_parses_json_and_falls_back_to_plain_text():
+    from app.translator import REVISE_RULES
+
+    replies = [
+        json.dumps({"original": "mungkin [[T0]]", "translation": "perhaps [[T0]]"}),
+        "just the translation",
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        assert body["generationConfig"]["responseMimeType"] == "application/json"
+        assert "mungkin kalian" in body["systemInstruction"]["parts"][0]["text"]
+        assert REVISE_RULES.splitlines()[0] in body["systemInstruction"]["parts"][0]["text"]
+        return httpx.Response(
+            200,
+            json={"candidates": [{"content": {"parts": [{"text": replies.pop(0)}]}}]},
+        )
+
+    glossary = Glossary.load(GLOSSARY_PATH).merged(["Grace Church"])
+    translator = GeminiTranslator("key", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    request = TranslationRequest("morning kalian Grace Church", "id", glossary, [], chosen_language="en")
+    corrected, translation, missing = await translator.revise(request)
+    assert corrected == "mungkin Grace Church"
+    assert translation == "perhaps Grace Church"
+    assert missing == []
+    same, plain, _missing = await translator.revise(request)
+    assert same == request.text
+    assert plain == "just the translation"
+    await translator.aclose()
+
+
 class MemorySpeaker:
     def __init__(self):
         self.calls = []
@@ -214,6 +263,54 @@ async def test_voice_runs_for_a_final_line_only():
     assert all(language == "id" for _text, language in speaker.calls)
     assert finals[0]["audio"] is True
     assert pipe.clips[finals[0]["id"]]
+
+
+@pytest.mark.asyncio
+async def test_a_growing_sentence_is_spoken_to_the_end_before_the_next_one():
+    from app.pipeline import speech_addition
+
+    assert speech_addition("Halo gereja.", "Halo gereja pagi ini.") == "pagi ini."
+    assert speech_addition("Halo gereja.", "Halo gereja.") is None
+    speaker = MemorySpeaker()
+    spoken = document()
+    spoken["voice"] = True
+    pipe = SessionPipeline(
+        spoken,
+        MemoryRepository(),
+        ScriptedRecognizer(["Hello"]),
+        GlossaryTranslator(),
+        Glossary.load(GLOSSARY_PATH),
+        FAST,
+        speaker,
+    )
+
+    def line(line_id: str, text: str) -> dict:
+        return {
+            "id": line_id,
+            "state": "final",
+            "original": text,
+            "translation": text,
+            "listener_original": text,
+            "listener_translation": text,
+            "hidden": False,
+            "suppressed": False,
+            "t0": 0,
+            "t1": 1,
+        }
+
+    pipe.doc["lines"] = [line("L00001", "Halo gereja."), line("L00002", "Kalimat berikutnya.")]
+    pipe._enqueue_speech("L00001", "Halo gereja.", pipe.audio_epoch)
+    pipe._enqueue_speech("L00001", "Halo gereja pagi ini.", pipe.audio_epoch)
+    pipe._enqueue_speech("L00002", "Kalimat berikutnya.", pipe.audio_epoch)
+    await pipe.idle()
+    assert speaker.calls == [
+        ("Halo gereja.", "id"),
+        ("pagi ini.", "id"),
+        ("Kalimat berikutnya.", "id"),
+    ]
+    assert b"Halo gereja." in pipe.clips["L00001"]
+    assert b"pagi ini." in pipe.clips["L00001#2"]
+    assert pipe.doc["lines"][0]["audio_id"] == "L00001#2"
 
 
 @pytest.mark.asyncio

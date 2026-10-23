@@ -8,6 +8,7 @@ import hmac
 import logging
 import secrets
 
+from app.audio import clamp_input_boost
 from app.pipeline import PipelineConfig, SessionPipeline
 from app.propresenter import Stage, validate_propresenter
 from app.rtmp import UNAVAILABLE, RtmpIngest, rtmp_ready
@@ -138,6 +139,7 @@ class Director:
             "service_note": (note or "").strip(),
             "service_date": service_date.isoformat() if service_date else "",
             "input": "browser",
+            "input_boost": 2.0,
             "ingest_token": secrets.token_urlsafe(18),
             "propresenter": {"enabled": False, "base_url": "", "message": "", "token": "Translation"},
         }
@@ -341,6 +343,15 @@ class Director:
                 await self.youtube.start(session_id)
         await self.stage.start(session_id)
 
+    async def pause(self, session_id: str) -> None:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        await self.ingest.stop(session_id)
+        await self.youtube.stop(session_id)
+        await pipeline.pause()
+        await self.stage.stop(session_id)
+
     async def stop(self, session_id: str) -> None:
         pipeline = self.pipelines.get(session_id)
         if pipeline is None:
@@ -384,21 +395,42 @@ class Director:
         await self.remember(session_id)
         return glossary.to_dict()
 
-    async def set_input(self, session_id: str, source: str) -> str:
-        if source not in {"browser", "rtmp"}:
-            raise ValueError("Audio source must be the microphone or OBS.")
+    async def set_input(self, session_id: str, source: str, url: str = "") -> str:
+        if source not in {"browser", "rtmp", "youtube"}:
+            raise ValueError("Audio source must be the microphone, OBS, or YouTube.")
         pipeline = self.pipelines.get(session_id)
         if pipeline is None:
             raise KeyError(session_id)
-        if pipeline.doc.get("input") == "youtube":
-            raise RuntimeError("A YouTube test keeps its audio source.")
+        page = ""
+        if source == "youtube":
+            raw = (url or str(pipeline.doc.get("youtube_url") or "")).strip()
+            if not raw:
+                raise ValueError("Paste a YouTube link.")
+            page = check_youtube_url(raw)
         if pipeline.started and pipeline.doc.get("status") != "ended":
             raise RuntimeError("End the session before changing the audio source.")
         async with pipeline.lock:
             pipeline.doc["input"] = source
+            if page:
+                pipeline.doc["youtube_url"] = page
+                pipeline.doc.setdefault("youtube_offset", 0)
+                pipeline.doc.setdefault("youtube_duration", 0)
+                pipeline.doc.setdefault("youtube_live", False)
+        if source != "youtube":
+            await self.youtube.stop(session_id)
         await pipeline._emit("status")
         await self.remember(session_id)
         return source
+
+    async def set_input_boost(self, session_id: str, value) -> float:
+        pipeline = self.pipelines.get(session_id)
+        if pipeline is None:
+            raise KeyError(session_id)
+        gain = clamp_input_boost(value)
+        pipeline.input_boost = gain
+        pipeline.doc["input_boost"] = gain
+        await self.remember(session_id)
+        return gain
 
     async def set_propresenter(self, session_id: str, raw: dict) -> dict:
         pipeline = self.pipelines.get(session_id)
@@ -609,6 +641,41 @@ class Director:
                 pipeline.doc["church_name"] = name
                 pipeline.doc["church_note"] = note
             await self._durable(pipeline.doc)
+
+    async def apply_speech(self, church_id: str, stt_provider: str, tts_provider: str) -> None:
+        """The settings page chooses the model. Open services follow that choice."""
+        stt_provider = _named_provider(stt_provider, "default", {"default", "soniox"})
+        tts_provider = _named_provider(tts_provider, "google", {"google", "soniox"})
+        seen: set[str] = set()
+        for pipeline in list(self.pipelines.values()):
+            if str(pipeline.doc.get("church_id") or "") != str(church_id):
+                continue
+            seen.add(str(pipeline.doc.get("id") or ""))
+            async with pipeline.lock:
+                pipeline.doc["stt_provider"] = stt_provider
+                pipeline.doc["tts_provider"] = tts_provider
+            pipeline.recognizer = self._recognizer_for(pipeline.doc)
+            pipeline.speaker = self._speaker_for(pipeline.doc)
+            await self.repository.save(pipeline.doc["id"], pipeline.doc)
+            await self._durable(pipeline.doc)
+        if self.accounts is None:
+            return
+        rows = await self.accounts.db.fetch(
+            "SELECT id, document FROM services WHERE church_id = $1 AND status <> 'deleted'",
+            church_id,
+        )
+        for row in rows:
+            if str(row["id"]) in seen:
+                continue
+            document = row["document"]
+            if isinstance(document, str):
+                import json
+                document = json.loads(document)
+            if document.get("stt_provider") == stt_provider and document.get("tts_provider") == tts_provider:
+                continue
+            document["stt_provider"] = stt_provider
+            document["tts_provider"] = tts_provider
+            await self.accounts.save_document(row["id"], document)
 
     def _may_open(self, document, *, church_id: str | None, token: str | None, public: bool) -> bool:
         if public:

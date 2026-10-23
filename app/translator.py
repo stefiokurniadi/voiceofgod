@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import logging
 import re
 
@@ -33,9 +34,20 @@ Keep every token that looks like [[T0]] exactly as written.
 Output only the translation, with no label and no quotes.
 When the target language is Bahasa Indonesia, use natural formal worship Indonesian.
 Address people as Anda, never kamu or slang.
-When a phrase is already in the target language, leave it as spoken. A third language stays only when the source is a single language.
+The output must be entirely in the target language. If the sentence is already in the target language, output that same sentence. Do not translate it into the source language.
 When the source is mixed English and Bahasa Indonesia, rewrite every clause into the target language. Do not leave the other language, except a name you were told to keep.
 """
+
+REVISE_RULES = """The sentence is raw speech recognition from a sermon that mixes Bahasa Indonesia and English.
+Words can be misheard across languages. For example, "morning kalian" may be "mungkin kalian", "share" may be "syiar", and "well" may be "walau".
+Reply as JSON with two string fields, original and translation.
+In original, fix only clearly misheard words, broken punctuation, and the capitalization of church terms such as Roh Kudus, firman Tuhan, Bapa, Tuhan Yesus, and Alkitab.
+Keep English that was really spoken. Keep casual words such as enggak, kalian, bikin, and oke. Do not formalize the Indonesian. Do not add, drop, or reorder what was said.
+Keep every token that looks like [[T0]] exactly as written.
+The translation field follows the translation rules above and is entirely in the target language.
+"""
+
+REVISE_PROMPT = SYSTEM_PROMPT + "\n" + REVISE_RULES
 
 
 SPEAKER_LANGUAGES = frozenset({"en", "id", "mix"})
@@ -62,6 +74,35 @@ def target_language(source_language: str, chosen: str | None = None) -> str:
     if source_language == "mix":
         return chosen if chosen in {"en", "id"} else "id"
     return "en"
+
+
+_ENGLISH_MARKERS = frozenset({
+    "the", "of", "in", "their", "and", "to", "a", "an", "is", "for", "that", "this",
+    "with", "you", "we", "they", "our", "your", "his", "her", "not", "are", "was",
+    "be", "have", "from", "as", "on", "at", "by", "or", "if", "but", "so", "it",
+    "he", "she", "them", "his", "its", "into", "about", "than", "then",
+})
+_INDONESIAN_MARKERS = frozenset({
+    "yang", "dan", "di", "ke", "dari", "ini", "itu", "dengan", "untuk", "pada",
+    "adalah", "tidak", "ada", "kami", "kita", "mereka", "saya", "anda", "dalam",
+    "akan", "juga", "atau", "karena", "jika", "kalau", "kepada", "oleh", "sebagai",
+    "telah", "sudah", "belum", "sangat", "hanya", "orang", "nya", "lah", "pun",
+    "bukan", "agar", "supaya", "saat", "ketika", "bagi", "atas", "tanpa",
+})
+
+
+def phrase_language(text: str) -> str | None:
+    """English or Indonesian when the sentence is clearly one of those, otherwise unknown."""
+    words = re.findall(r"[A-Za-z']+", text.casefold())
+    if not words:
+        return None
+    english = sum(word in _ENGLISH_MARKERS for word in words)
+    indonesian = sum(word in _INDONESIAN_MARKERS for word in words)
+    if english and not indonesian:
+        return "en"
+    if indonesian and not english:
+        return "id"
+    return None
 
 
 def language_name(language: str) -> str:
@@ -241,6 +282,64 @@ class GeminiTranslator:
         if missing:
             logger.info("glossary tokens missing from model output: %s", len(missing))
         return restored, missing
+
+    async def revise(self, request: TranslationRequest) -> tuple[str, str, list[str]]:
+        """Correct the heard line and translate it in one reply."""
+        if not request.text.strip():
+            return "", "", []
+        protection = request.glossary.protect(request.text, request.source_language, request.chosen_language)
+        payload = {
+            "systemInstruction": {"parts": [{"text": REVISE_PROMPT}]},
+            "contents": [{"role": "user", "parts": [{"text": build_user_message(request, protection.text)}]}],
+            "generationConfig": {
+                "temperature": 0,
+                "maxOutputTokens": 800,
+                "thinkingConfig": {"thinkingBudget": 0},
+                "responseMimeType": "application/json",
+                "responseSchema": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "original": {"type": "STRING"},
+                        "translation": {"type": "STRING"},
+                    },
+                    "required": ["original", "translation"],
+                },
+            },
+        }
+        response = await self._client.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+            headers={"x-goog-api-key": self.api_key},
+            json=payload,
+        )
+        response.raise_for_status()
+        raw = _gemini_text(response.json())
+        parsed = _parse_revision(raw)
+        if parsed is None:
+            restored, missing = request.glossary.restore(clean_model_output(raw), protection)
+            if missing:
+                logger.info("glossary tokens missing from model output: %s", len(missing))
+            return request.text, restored, missing
+        corrected, translation = parsed
+        corrected, missing_original = request.glossary.restore_source(corrected, protection)
+        translation, missing_translation = request.glossary.restore(clean_model_output(translation), protection)
+        missing = list(dict.fromkeys([*missing_original, *missing_translation]))
+        if missing:
+            logger.info("glossary tokens missing from model output: %s", len(missing))
+        return corrected, translation, missing
+
+
+def _parse_revision(raw: str) -> tuple[str, str] | None:
+    try:
+        body = json.loads(raw.strip())
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    original = body.get("original")
+    translation = body.get("translation")
+    if not isinstance(original, str) or not isinstance(translation, str):
+        return None
+    return original.strip(), translation.strip()
 
 
 def _gemini_text(body: dict) -> str:

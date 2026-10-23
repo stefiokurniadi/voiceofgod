@@ -12,7 +12,7 @@ from app.main import create_app
 from app.store import MemoryRepository
 from app.stt import ScriptedRecognizer
 from app.translator import GlossaryTranslator, TranslationRequest, build_user_message
-from tests.test_phase1 import FAST, feed
+from tests.test_phase1 import FAST, feed, settle
 
 ADMIN_USER = "admin"
 ADMIN_PASS = "test-admin-pass"
@@ -213,8 +213,7 @@ async def test_a_saved_service_reopens_after_the_pipelines_are_gone():
         assert started.status_code == 200
         pipe = app.state.director.pipeline(body["id"])
         await feed(pipe, 1.0, 0.25)
-        await feed(pipe, 0.4, 0.0)
-        await pipe.idle()
+        await settle(pipe)
         original = pipe.doc["lines"][0]["original"]
         session_id = body["id"]
     app.state.director.pipelines.clear()
@@ -299,8 +298,7 @@ async def test_the_translator_receives_the_church_and_service_notes():
         )
         pipe = app.state.director.pipeline(body["id"])
         await feed(pipe, 1.0, 0.25)
-        await feed(pipe, 0.4, 0.0)
-        await pipe.idle()
+        await settle(pipe)
     assert translator.seen
     background = translator.seen[-1]
     assert "Grace Church" in background

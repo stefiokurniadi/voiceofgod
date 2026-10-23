@@ -204,6 +204,16 @@ class Glossary:
                 missing.append(span.replacement)
         return text, missing
 
+    def restore_source(self, text: str, protection: Protection) -> tuple[str, list[str]]:
+        """Put each token back as the words that were spoken."""
+        missing: list[str] = []
+        for span in sorted(protection.spans, key=lambda item: len(item.token), reverse=True):
+            pattern = re.compile(re.escape(span.token), re.IGNORECASE)
+            text, count = pattern.subn(lambda _match, value=span.surface: value, text)
+            if not count:
+                missing.append(span.surface)
+        return text, missing
+
 
 def _find(phrase: str, text: str):
     pattern = re.compile(rf"(?<![\w]){re.escape(phrase)}(?![\w])", re.IGNORECASE)

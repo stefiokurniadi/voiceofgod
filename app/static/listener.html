@@ -274,9 +274,10 @@
 
     function enqueue(line) {
       if (!listening || !line || line.state !== "final" || line.hidden || !line.audio) return;
-      if (heard.has(line.id) || queue.includes(line.id)) return;
-      heard.add(line.id);
-      queue.push(line.id);
+      const clip = line.audio_id || line.id;
+      if (heard.has(clip) || queue.includes(clip)) return;
+      heard.add(clip);
+      queue.push(clip);
       pump();
     }
 

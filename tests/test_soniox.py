@@ -30,6 +30,11 @@ def test_soniox_request_uses_language_hints_and_church_names():
     plain = soniox_request("stt-rt-v5", "en", None)
     assert plain["language_hints"] == ["en"]
     assert "Holy Spirit" in plain["context"]["terms"]
+    indonesian = soniox_request("stt-rt-v5", "id", None)
+    assert "Roh Kudus" in indonesian["context"]["terms"]
+    assert "this Sunday morning" not in indonesian["context"]["terms"]
+    assert "syiar" in mixed["context"]["terms"]
+    assert "Holy Spirit" in mixed["context"]["terms"]
 
 
 def test_soniox_tokens_join_into_words():
@@ -97,7 +102,7 @@ def test_soniox_recognizer_sends_one_clip_and_keeps_final_tokens():
     assert config["language_hints"] == ["en"]
     assert config["context"]["terms"][0] == "Grace Church"
     assert isinstance(sock.sent[1], bytes) and sock.sent[1]
-    assert sock.sent[2] == b""
+    assert sock.sent[-1] == ""
 
 
 @pytest.mark.asyncio
@@ -162,6 +167,11 @@ async def test_a_session_uses_the_saved_speech_providers():
     assert pipeline.speaker is voice
     assert pipeline.doc["stt_provider"] == "soniox"
     assert pipeline.doc["tts_provider"] == "soniox"
+    await director.apply_speech("church", "default", "google")
+    assert pipeline.doc["stt_provider"] == "default"
+    assert pipeline.doc["tts_provider"] == "google"
+    assert pipeline.recognizer is default
+    assert pipeline.speaker is google
 
     bare = Director(
         Settings(allow_fake_models=True),
@@ -246,3 +256,17 @@ async def test_settings_save_soniox_for_the_next_service():
     assert pipeline.speaker is app.state.speakers["soniox"]
     assert type(pipeline.recognizer).__name__ == "SonioxRecognizer"
     assert type(pipeline.speaker).__name__ == "SonioxSpeaker"
+    switched = await client.put(
+        "/api/settings",
+        json={
+            "speaker_language": "en",
+            "tts_enabled": False,
+            "stt_provider": "default",
+            "tts_provider": "google",
+        },
+    )
+    assert switched.status_code == 200
+    assert pipeline.doc["stt_provider"] == "default"
+    assert pipeline.doc["tts_provider"] == "google"
+    assert pipeline.recognizer is app.state.recognizers["default"]
+    assert pipeline.speaker is app.state.director._speaker_for({"tts_provider": "google"})

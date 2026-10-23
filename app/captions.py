@@ -40,6 +40,7 @@ class CaptionLine:
     translate_ms: float | None = None
     latency_ms: float | None = None
     glossary_miss: list[str] = field(default_factory=list)
+    heard: str = ""
 
     def as_dict(self) -> dict:
         return {
@@ -60,6 +61,7 @@ class CaptionLine:
             "translate_ms": self.translate_ms,
             "latency_ms": self.latency_ms,
             "glossary_miss": list(self.glossary_miss),
+            "heard": self.heard,
         }
 
 
@@ -107,11 +109,14 @@ def project_line(data: dict | None, role: str, *, tombstone: bool = False) -> di
         projected["glossary_miss"] = data.get("glossary_miss") or []
         projected["full_original"] = data.get("original") or ""
         projected["full_translation"] = data.get("translation") or ""
+        projected["heard"] = data.get("heard") or ""
     if role == "listener" and data.get("state") == "provisional" and not suppressed:
         projected["translation"] = ""
     if "settled" in data:
         projected["settled"] = max(0, int(data.get("settled") or 0))
     projected["audio"] = bool(data.get("audio"))
+    if projected["audio"]:
+        projected["audio_id"] = data.get("audio_id") or data.get("id")
     return projected
 
 

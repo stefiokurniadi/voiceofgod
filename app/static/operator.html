@@ -23,7 +23,6 @@
     </div>
     <div class="console-status">
       <span class="badge badge-ready" id="status">Ready</span>
-      <div class="metrics" id="metrics"></div>
     </div>
     <div class="console-actions">
       <button class="btn-primary btn-lg" id="start" type="button" aria-pressed="false">Start captions</button>
@@ -38,25 +37,33 @@
       <div class="tabs" role="tablist" aria-label="Console">
         <button type="button" role="tab" id="tab-audio" aria-controls="panel-audio" aria-selected="true">Audio</button>
         <button type="button" role="tab" id="tab-share" aria-controls="panel-share" aria-selected="false">Share</button>
-        <button type="button" role="tab" id="tab-glossary" aria-controls="panel-glossary" aria-selected="false">Glossary</button>
         <button type="button" role="tab" id="tab-stage" aria-controls="panel-stage" aria-selected="false">ProPresenter</button>
+        <button type="button" role="tab" id="tab-others" aria-controls="panel-others" aria-selected="false">Others</button>
       </div>
 
       <div class="tab-panel" role="tabpanel" id="panel-audio" aria-labelledby="tab-audio">
         <div class="section">
           <h3>Input</h3>
           <canvas id="wave" class="wave" width="640" height="96" aria-label="Microphone waveform"></canvas>
+          <div class="field" id="boost-field">
+            <label for="input-boost">Input boost</label>
+            <input id="input-boost" type="range" min="1" max="4" step="0.5" value="2">
+            <p class="hint" id="input-boost-label">2×</p>
+          </div>
           <div class="field">
             <label for="source">Audio source</label>
             <select id="source">
               <option value="browser">This computer's microphone</option>
               <option value="rtmp">OBS stream (RTMP)</option>
-              <option value="youtube" hidden>YouTube video</option>
+              <option value="youtube">YouTube stream</option>
             </select>
             <p class="hint" id="source-hint">Change the source while the service is not running.</p>
           </div>
           <section id="youtube-box" hidden>
-            <p class="alert info">This test plays a YouTube video into the captions. The microphone stays off. Release the slider to continue from that time.</p>
+            <div class="field">
+              <label for="youtube-url">YouTube link</label>
+              <input id="youtube-url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" spellcheck="false" autocomplete="off">
+            </div>
             <div class="field">
               <label class="switch">
                 <input type="checkbox" id="youtube-hear" role="switch" checked>
@@ -132,16 +139,6 @@
             </label>
           </div>
         </div>
-        <div class="section">
-          <h3>Transcript</h3>
-          <div class="button-row">
-            <a class="btn btn-sm" id="download-txt" href="">Download TXT</a>
-            <a class="btn btn-sm" id="download-srt" href="">Download SRT</a>
-          </div>
-          <div class="button-row">
-            <button class="btn btn-sm btn-danger" id="delete" type="button">Delete service</button>
-          </div>
-        </div>
       </div>
 
       <div class="tab-panel" role="tabpanel" id="panel-share" aria-labelledby="tab-share" hidden>
@@ -150,6 +147,10 @@
           <div class="qr-card">
             <img id="qr" alt="QR code for the listener page">
             <p>Show this on screen. Listeners scan it with their phone camera. No app or account needed.</p>
+            <div class="button-row qr-actions">
+              <button class="btn" type="button" id="qr-share">Share</button>
+              <button class="btn" type="button" id="qr-download">Download</button>
+            </div>
           </div>
           <div class="field">
             <label for="listener-url">Listener link</label>
@@ -185,24 +186,36 @@
         </div>
       </div>
 
-      <div class="tab-panel" role="tabpanel" id="panel-glossary" aria-labelledby="tab-glossary" hidden>
-        <div class="section">
-          <h3>Terms</h3>
-          <p class="hint" style="margin-bottom:0.85rem">Fixed translations for this service. Changes apply to the next sentence.</p>
-          <div class="glossary-head"><span class="label">English</span><span class="label">Bahasa Indonesia</span><span></span></div>
-          <div id="glossary-rows"></div>
-          <button class="btn btn-sm" type="button" id="glossary-add">+ Add term</button>
+      <div class="tab-panel" role="tabpanel" id="panel-others" aria-labelledby="tab-others" hidden>
+        <div class="others-scroll">
+          <div class="section">
+            <h3>Transcript</h3>
+            <div class="button-row">
+              <a class="btn btn-sm" id="download-txt" href="">Download TXT</a>
+              <a class="btn btn-sm" id="download-srt" href="">Download SRT</a>
+            </div>
+          </div>
+          <div class="section">
+            <h3>Terms</h3>
+            <p class="hint" style="margin-bottom:0.85rem">Fixed translations for this service. Changes apply to the next sentence.</p>
+            <div class="glossary-head"><span class="label">English</span><span class="label">Bahasa Indonesia</span><span></span></div>
+            <div id="glossary-rows"></div>
+            <button class="btn btn-sm" type="button" id="glossary-add">+ Add term</button>
+          </div>
+          <div class="section">
+            <h3>Keep as spoken</h3>
+            <div class="field">
+              <label for="glossary-dnt" class="visually-hidden">Names to keep as spoken</label>
+              <textarea id="glossary-dnt" rows="4"></textarea>
+              <p class="hint">One per line. Names and phrases that are never translated.</p>
+            </div>
+            <div class="button-row">
+              <button class="btn btn-primary" type="button" id="glossary-save">Save glossary</button>
+            </div>
+          </div>
         </div>
-        <div class="section">
-          <h3>Keep as spoken</h3>
-          <div class="field">
-            <label for="glossary-dnt" class="visually-hidden">Names to keep as spoken</label>
-            <textarea id="glossary-dnt" rows="4"></textarea>
-            <p class="hint">One per line. Names and phrases that are never translated.</p>
-          </div>
-          <div class="button-row">
-            <button class="btn btn-primary" type="button" id="glossary-save">Save glossary</button>
-          </div>
+        <div class="others-foot">
+          <button class="btn btn-sm btn-danger" id="delete" type="button">Delete service</button>
         </div>
       </div>
 
@@ -239,6 +252,9 @@
           </div>
         </div>
       </div>
+      <footer class="side-meta">
+        <div class="metrics" id="metrics"></div>
+      </footer>
     </aside>
 
     <div class="columns">
@@ -327,6 +343,7 @@
     let socket = null;
     let audioContext = null;
     let captureNode = null;
+    let boostGain = null;
     let stream = null;
     let snapshot = { lines: [] };
     let lastLineId = "";
@@ -344,13 +361,15 @@
       decorate: decorate,
       keepHidden: true,
       dictate: () => true,
-      showTime: true
+      showTime: true,
+      centerLive: true
     });
     const translationView = CaptionView(document.querySelector("#translation"), {
       fieldOf: () => "full_translation",
       keepHidden: true,
       finalsOnly: true,
-      showTime: true
+      showTime: true,
+      centerLive: true
     });
 
     for (const tab of document.querySelectorAll("[role=tab]")) {
@@ -420,16 +439,25 @@
     let waveTimer = 0;
     let analyser = null;
 
+    function setStopControl() {
+      const live = snapshot.status === "live";
+      stopButton.textContent = live ? "Stop" : "End";
+      stopButton.classList.toggle("live", live);
+      stopButton.disabled = stopped || snapshot.status === "ended";
+      stopButton.setAttribute("aria-pressed", live ? "true" : "false");
+    }
+
     function setRunning(on) {
       startButton.classList.toggle("live", on);
-      stopButton.classList.toggle("live", on);
       startButton.textContent = on ? "Live" : (snapshot.status === "paused" ? "Resume captions" : "Start captions");
       startButton.setAttribute("aria-pressed", on ? "true" : "false");
-      stopButton.setAttribute("aria-pressed", on ? "true" : "false");
+      setStopControl();
     }
 
     function setStatus(status) {
+      snapshot.status = status;
       UI.setBadge(statusBadge, status);
+      setStopControl();
       document.title = `${status === "live" ? "● " : ""}${snapshot.service_name || "Console"} · voiceofgod`;
       const playing = inputMode === "youtube" && status === "live";
       document.querySelector("#youtube-pause").hidden = !playing;
@@ -453,6 +481,7 @@
       if (snapshot.church_name) parts.push(snapshot.church_name);
       parts.push(UI.languagePair(source, caption));
       document.querySelector("#service-sub").textContent = parts.join(" · ");
+      showMetrics(snapshot.metrics);
     }
 
     function externalAudio() {
@@ -460,16 +489,56 @@
     }
 
     function setSourceLocked(status) {
-      document.querySelector("#source").disabled = inputMode === "youtube" || status === "live" || status === "paused";
+      const locked = status === "live";
+      document.querySelector("#source").disabled = locked;
+      document.querySelector("#youtube-url").disabled = locked;
+    }
+
+    function clampBoost(value) {
+      const number = Number(value);
+      if (!Number.isFinite(number)) return 2;
+      const stepped = Math.round(number * 2) / 2;
+      return Math.min(4, Math.max(1, stepped));
+    }
+
+    function formatBoost(value) {
+      const gain = clampBoost(value);
+      return Number.isInteger(gain) ? `${gain}×` : `${gain.toFixed(1)}×`;
+    }
+
+    function applyBoost(value) {
+      const input = document.querySelector("#input-boost");
+      const gain = clampBoost(value === undefined || value === null || value === "" ? input.value : value);
+      if (document.activeElement !== input) input.value = String(gain);
+      document.querySelector("#input-boost-label").textContent = formatBoost(input.value);
+      if (boostGain) boostGain.gain.value = clampBoost(input.value);
+    }
+
+    let boostTicket = 0;
+    async function saveBoost(gain) {
+      const ticket = ++boostTicket;
+      const response = await fetch(`/api/sessions/${sessionId}/input-boost`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify({ input_boost: gain })
+      });
+      let body = {};
+      try { body = await response.json(); } catch (err) { body = {}; }
+      if (ticket !== boostTicket) return;
+      if (!response.ok) {
+        UI.toast(body.detail || "Could not save the input boost.", "error");
+        return;
+      }
+      applyBoost(body.input_boost);
     }
 
     function showSource() {
-      const rtmp = inputMode === "rtmp";
-      document.querySelector("#rtmp-box").hidden = !rtmp;
-      document.querySelector("#youtube-box").hidden = inputMode !== "youtube";
-      document.querySelector("#source option[value=youtube]").hidden = inputMode !== "youtube";
-      document.querySelector("#source-hint").textContent = inputMode === "youtube"
-        ? "This test plays the YouTube video. The microphone stays off."
+      const chosen = document.querySelector("#source").value;
+      document.querySelector("#rtmp-box").hidden = chosen !== "rtmp";
+      document.querySelector("#youtube-box").hidden = chosen !== "youtube";
+      document.querySelector("#boost-field").hidden = chosen === "youtube";
+      document.querySelector("#source-hint").textContent = chosen === "youtube"
+        ? "Paste a YouTube link. Captions follow the video, and the microphone stays off."
         : "Change the source while the service is not running.";
       const playing = inputMode === "youtube" && snapshot.status === "live";
       document.querySelector("#youtube-pause").hidden = !playing;
@@ -484,6 +553,7 @@
       document.querySelector("#source").value = inputMode;
       document.querySelector("#rtmp-server").value = next.rtmp.server || "";
       document.querySelector("#rtmp-key").value = next.rtmp.stream_key || "";
+      document.querySelector("#youtube-url").value = next.youtube_url || "";
       const stage = next.propresenter || {};
       document.querySelector("#pp-enabled").checked = Boolean(stage.enabled);
       document.querySelector("#pp-url").value = stage.base_url || "";
@@ -580,6 +650,7 @@
       if (lag != null) parts.push(metric("Delay", `${(lag / 1000).toFixed(1)} s`));
       if (stt != null) parts.push(metric("Speech", `${Math.round(stt)} ms`));
       if (translate != null) parts.push(metric("Translate", `${Math.round(translate)} ms`));
+      if (snapshot.speech_model) parts.push(metric("Model", snapshot.speech_model));
       if (gpuReading) parts.push(metric("GPU", `${Math.round(gpuReading.utilization_percent)}%`));
       metrics.replaceChildren(...parts);
     }
@@ -619,6 +690,7 @@
     }
 
     function paint(next, mode) {
+      if (!next.speech_model && snapshot.speech_model) next.speech_model = snapshot.speech_model;
       snapshot = next;
       remember(next);
       if (next.service_name) document.querySelector("#service-title").textContent = next.service_name;
@@ -629,6 +701,7 @@
       document.querySelector("#voice").checked = Boolean(next.voice);
       fillGlossary(next.glossary);
       fillOutput(next);
+      if (next && "input_boost" in next) applyBoost(next.input_boost);
       setSourceLocked(next.status);
       setRunning(next.status === "live" && (externalAudio() || Boolean(stream)));
       const rendered = withOperatorText(next);
@@ -748,13 +821,16 @@
       const node = new AudioWorkletNode(audioContext, "pcm-capture");
       const mute = audioContext.createGain();
       mute.gain.value = 0;
+      boostGain = audioContext.createGain();
+      boostGain.gain.value = clampBoost(document.querySelector("#input-boost").value);
       analyser = audioContext.createAnalyser();
       analyser.fftSize = 1024;
       node.port.onmessage = (event) => {
         if (socket && socket.readyState === WebSocket.OPEN) socket.send(event.data);
       };
-      source.connect(node);
-      source.connect(analyser);
+      source.connect(boostGain);
+      boostGain.connect(node);
+      boostGain.connect(analyser);
       node.connect(mute);
       mute.connect(audioContext.destination);
       captureNode = node;
@@ -770,6 +846,10 @@
       error.textContent = "";
       UI.busy(startButton, true, "Starting");
       try {
+        if (document.querySelector("#source").value === "youtube" && !(await saveSource("youtube"))) {
+          UI.busy(startButton, false);
+          return;
+        }
         const response = await fetch(`/api/sessions/${sessionId}/start`, { method: "POST", headers });
         const body = await response.json();
         if (!response.ok) {
@@ -779,7 +859,13 @@
           return;
         }
         UI.busy(startButton, false);
+        if (body.speech_model) {
+          snapshot.speech_model = body.speech_model;
+          setLanguage(snapshot.speaker_language, snapshot.translation_language);
+          UI.toast(`Hearing speech with ${body.speech_model}`);
+        }
         if (externalAudio()) {
+          if (inputMode === "youtube" && youtubeHear.checked) player.unlock();
           setRunning(true);
           setSourceLocked("live");
           if (inputMode === "rtmp" && snapshot.rtmp && snapshot.rtmp.available === false) {
@@ -803,18 +889,51 @@
       }
     });
 
-    stopButton.addEventListener("click", async () => {
-      if (!stopButton.classList.contains("live") && snapshot.status !== "live" && snapshot.status !== "paused") return;
-      await fetch(`/api/sessions/${sessionId}/stop`, { method: "POST", headers });
+    async function releaseMic() {
       if (stream) stream.getTracks().forEach((track) => track.stop());
       stream = null;
       captureNode = null;
-      setRunning(false);
+      boostGain = null;
       restWave();
       if (audioContext) {
         await audioContext.close();
         audioContext = null;
       }
+    }
+
+    stopButton.addEventListener("click", async () => {
+      if (stopped || snapshot.status === "ended") return;
+      if (snapshot.status === "live") {
+        const response = await fetch(`/api/sessions/${sessionId}/pause`, { method: "POST", headers });
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({}));
+          UI.toast(body.detail || "Could not stop captions.", "error");
+          return;
+        }
+        await releaseMic();
+        setStatus("paused");
+        setRunning(false);
+        setSourceLocked("paused");
+        return;
+      }
+      const ok = await UI.confirmAction({
+        title: "End this service?",
+        message: "Listeners will see that this service has ended. You can press Start to continue it.",
+        confirm: "End service",
+        danger: true
+      });
+      if (!ok) return;
+      const response = await fetch(`/api/sessions/${sessionId}/stop`, { method: "POST", headers });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({}));
+        UI.toast(body.detail || "Could not end the service.", "error");
+        return;
+      }
+      await releaseMic();
+      setStatus("ended");
+      setBanner("ended", "");
+      setRunning(false);
+      setSourceLocked("ended");
     });
 
     document.querySelector("#delete").addEventListener("click", async () => {
@@ -841,25 +960,43 @@
       document.querySelector("#translation").replaceChildren();
     });
 
-    document.querySelector("#source").addEventListener("change", async (event) => {
-      const next = event.target.value;
-      if (next === "youtube") {
-        event.target.value = inputMode;
-        return;
+    async function saveSource(next) {
+      const url = document.querySelector("#youtube-url").value.trim();
+      if (next === "youtube" && !url) {
+        showSource();
+        document.querySelector("#youtube-url").focus();
+        return false;
       }
       const response = await fetch(`/api/sessions/${sessionId}/input`, {
         method: "PUT",
         headers,
-        body: JSON.stringify({ input: next })
+        body: JSON.stringify({ input: next, url })
       });
       const body = await response.json();
       if (!response.ok) {
-        event.target.value = inputMode;
+        document.querySelector("#source").value = inputMode;
+        showSource();
         UI.toast(body.detail || "Could not change the audio source.", "error");
-        return;
+        return false;
       }
-      inputMode = next;
+      inputMode = body.input || next;
+      if (body.youtube_url) document.querySelector("#youtube-url").value = body.youtube_url;
+      document.querySelector("#source").value = inputMode;
       showSource();
+      return true;
+    }
+
+    document.querySelector("#source").addEventListener("change", (event) => {
+      saveSource(event.target.value);
+    });
+    document.querySelector("#input-boost").addEventListener("input", (event) => {
+      const gain = clampBoost(event.target.value);
+      document.querySelector("#input-boost-label").textContent = formatBoost(gain);
+      if (boostGain) boostGain.gain.value = gain;
+      saveBoost(gain);
+    });
+    document.querySelector("#youtube-url").addEventListener("change", () => {
+      if (document.querySelector("#source").value === "youtube") saveSource("youtube");
     });
 
     async function saveStage() {
@@ -945,7 +1082,76 @@
     document.querySelector("#overlay-url").value = overlayUrl;
     document.querySelector("#download-txt").href = `/api/sessions/${sessionId}/export.txt${secret}`;
     document.querySelector("#download-srt").href = `/api/sessions/${sessionId}/export.srt${secret}`;
+    function qrFileName() {
+      const name = (snapshot.service_name || "Listeners").trim().slice(0, 60);
+      const safe = name.replace(/[\\/:*?"<>|]+/g, "").trim() || "Listeners";
+      return `${safe} QR.png`;
+    }
+
+    function saveQrFile(file) {
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = file.name;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    async function listenerQrFile() {
+      const response = await fetch(`/api/sessions/${sessionId}/qr.svg${secret}`);
+      if (!response.ok) throw new Error("Could not load the QR code.");
+      const svg = await response.blob();
+      const url = URL.createObjectURL(svg);
+      try {
+        const image = new Image();
+        await new Promise((resolve, reject) => {
+          image.onload = resolve;
+          image.onerror = () => reject(new Error("Could not prepare the QR code."));
+          image.src = url;
+        });
+        const size = 640;
+        const canvas = document.createElement("canvas");
+        canvas.width = size;
+        canvas.height = size;
+        const ctx = canvas.getContext("2d");
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(0, 0, size, size);
+        ctx.drawImage(image, 0, 0, size, size);
+        const png = await new Promise((resolve) => canvas.toBlob(resolve, "image/png"));
+        if (!png) throw new Error("Could not prepare the QR code.");
+        return new File([png], qrFileName(), { type: "image/png" });
+      } finally {
+        URL.revokeObjectURL(url);
+      }
+    }
+
     document.querySelector("#qr").src = `/api/sessions/${sessionId}/qr.svg${secret}`;
+    document.querySelector("#qr-download").addEventListener("click", async () => {
+      try {
+        saveQrFile(await listenerQrFile());
+      } catch (err) {
+        UI.toast(err.message || "Could not download the QR code.", "error");
+      }
+    });
+    document.querySelector("#qr-share").addEventListener("click", async () => {
+      try {
+        const file = await listenerQrFile();
+        const title = snapshot.service_name || "Listeners";
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          await navigator.share({ title, url: listenerUrl, files: [file] });
+          return;
+        }
+        if (navigator.share) {
+          await navigator.share({ title, url: listenerUrl });
+          return;
+        }
+        saveQrFile(file);
+        UI.toast("QR code downloaded");
+      } catch (err) {
+        if (err && err.name === "AbortError") return;
+        UI.toast(err.message || "Could not share the QR code.", "error");
+      }
+    });
     if (pulpitSecret) {
       document.querySelector("#pulpit-section").hidden = false;
       document.querySelector("#pulpit-url").value = `${location.origin}/o/${sessionId}?k=${encodeURIComponent(pulpitSecret)}`;
@@ -999,6 +1205,7 @@
 
     const player = UI.hear();
     const youtubeHear = document.querySelector("#youtube-hear");
+    player.setEnabled(youtubeHear.checked);
     youtubeHear.addEventListener("change", () => player.setEnabled(youtubeHear.checked));
     UI.bindHearVolume(player, document.querySelector("#youtube-volume"), document.querySelector("#youtube-volume-label"));
     document.addEventListener("pointerdown", () => { if (youtubeHear.checked) player.unlock(); });

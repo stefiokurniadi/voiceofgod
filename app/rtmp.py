@@ -8,6 +8,7 @@ import hashlib
 import hmac
 import logging
 import shutil
+import time
 from urllib.parse import parse_qs, quote, urlsplit
 
 from app.audio import pcm16_to_float, rms
@@ -74,7 +75,9 @@ def reader_url(settings, session_id: str) -> str:
     port = parts.port or 1935
     password = quote(settings.rtmp_read_password, safe="")
     session = quote(session_id, safe="")
-    return f"rtmp://{READER_USER}:{password}@{parts.hostname}:{port}/live/{session}"
+    # MediaMTX 1.13 reads the RTMP user and password from the query string.
+    # Credentials in the URL userinfo are ignored, so the pull is refused.
+    return f"rtmp://{parts.hostname}:{port}/live/{session}?user={quote(READER_USER, safe='')}&pass={password}"
 
 
 class PcmBuffer:
@@ -176,9 +179,9 @@ class RtmpIngest:
                 pipeline = self._pipeline(session_id)
                 if pipeline is None or not pipeline.started or pipeline.failure_hold:
                     continue
-                banner = DROPPED if saw_audio or pipeline.rtmp_seen else WAITING
-                if pipeline.doc.get("status") == "live":
-                    await pipeline._set_status("paused", banner)
+                if not (saw_audio or pipeline.rtmp_seen) and pipeline.doc.get("status") == "live":
+                    if (pipeline.doc.get("banner") or "") != WAITING:
+                        await pipeline._set_status("live", WAITING)
                 await asyncio.sleep(1.0)
         finally:
             await self._kill(session_id)
@@ -198,6 +201,8 @@ class RtmpIngest:
             "32",
             "-analyzeduration",
             "0",
+            "-rw_timeout",
+            "5000000",
             "-i",
             url,
             "-vn",
@@ -215,16 +220,35 @@ class RtmpIngest:
         )
         self.procs[session_id] = proc
         drain = asyncio.create_task(_discard(proc.stderr))
+        watch = asyncio.create_task(self._abandon_when_quiet(session_id, pipeline, time.monotonic()))
         try:
             saw_audio = await consume_pcm(proc.stdout.read, pipeline.accept_pcm, pipeline.note_level)
             if saw_audio:
                 pipeline.rtmp_seen = True
             return saw_audio or pipeline.rtmp_seen
         finally:
+            watch.cancel()
             drain.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch
             with contextlib.suppress(asyncio.CancelledError):
                 await drain
             await self._kill(session_id)
+
+    async def _abandon_when_quiet(self, session_id: str, pipeline, started_at: float) -> None:
+        """A pull that receives nothing is stuck on the old publish. Close it and try again."""
+        limit = pipeline.config.capture_stall_seconds
+        while True:
+            await asyncio.sleep(min(0.4, limit))
+            proc = self.procs.get(session_id)
+            if proc is None or proc.returncode is not None:
+                return
+            now = time.monotonic()
+            if now - started_at < limit or now - pipeline.last_audio_at < limit:
+                continue
+            logger.info("obs ingest quiet for session %s; reconnecting", session_id)
+            await self._kill(session_id)
+            return
 
     async def _kill(self, session_id: str) -> None:
         proc = self.procs.pop(session_id, None)
